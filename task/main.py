@@ -5,7 +5,9 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from dotenv import load_dotenv
-from orderbook_mode import run_orderbook
+from orderbook_mode import run_victoria_orderbook_mode
+from driver_utils import init_driver
+
 
 import time
 import os
@@ -20,7 +22,8 @@ CHROME_DRIVER_PATH = os.getenv("CHROME_DRIVER_PATH")
 VICTORIA_URL = os.getenv("VICTORIA_URL")
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
-ORDERBOOK_REFRESH_INTERVAL = 2.5  # seconds
+
+ORDERBOOK_REFRESH_INTERVAL = 10  # seconds
 
 
 def get_env_float(key: str) -> float:
@@ -55,7 +58,7 @@ def init_driver():
 
 
 # -------------------------------------------------
-#   Binance 가격 가져오기 (공개 API, 키 필요 없음)
+#   Binance 가격 가져오기
 # -------------------------------------------------
 def get_binance_price(symbol: str) -> float:
     url = "https://api.binance.com/api/v3/ticker/price"
@@ -67,84 +70,90 @@ def get_binance_price(symbol: str) -> float:
 # -------------------------------------------------
 #   VictoriaEX 현재 심볼을 Binance 심볼로 변환
 # -------------------------------------------------
-def get_victoria_binance_symbol(driver) -> str:
+def get_current_binance_symbol_from_victoria(driver) -> str:
     unit_text = driver.find_element(By.CSS_SELECTOR, "span.unit").text.strip()
     return unit_text.replace("/", "").upper()
 
 
 # -------------------------------------------------
-#  바이낸스 가격 추종 모드 (모드 2) - 지금은 드라이런(출력만)
+#  바이낸스 가격 추종 모드 (모드 2)
 # -------------------------------------------------
-def run_follow_binance(driver):
-    driver.get(f"{VICTORIA_URL}/trade")
+def run_binance_referenced_mm_mode():
+    driver = init_driver()
 
-    # trade 페이지 기본 로딩 대기(최소)
-    WebDriverWait(driver, 20).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "b.pair-title"))
-    )
+    try:
+        driver.get(f"{VICTORIA_URL}/account/login")
+        input("Login and press Enter to continue...")
 
-    print("\n[모드 2] 바이낸스 가격 추종")
+        driver.get(f"{VICTORIA_URL}/trade")
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "b.pair-title"))
+        )
 
-    while True:
-        try:
-            if not driver.window_handles:
-                print("\n브라우저가 닫혔습니다. 프로그램 종료.")
-                break
+        print("\n[Mode 2] Binance-Referenced MM start..\n")
 
-            symbol = get_victoria_binance_symbol(
-                driver
-            )  # 매 루프마다 현재 선택 코인 읽기
-            binance_price = get_binance_price(symbol)
+        while True:
+            try:
+                symbol = get_current_binance_symbol_from_victoria(driver)
+                binance_price = get_binance_price(symbol)
 
-            discount = random.uniform(DISCOUNT_MIN, DISCOUNT_MAX)
-            target_price = binance_price * (1 - discount)
+                discount = random.uniform(DISCOUNT_MIN, DISCOUNT_MAX)
+                target_price = binance_price * (1 - discount)
 
-            print(
-                f"[{time.strftime('%H:%M:%S')}] Binance {symbol}={binance_price:.2f} | "
-                f"target(-{discount*100:.3f}%)={target_price:.2f}"
-            )
+                print(
+                    f"[{time.strftime('%H:%M:%S')}] Binance {symbol}={binance_price:.2f} | "
+                    f"target(-{discount*100:.3f}%)={target_price:.2f}"
+                )
 
-            # TODO: 여기서 VictoriaEX에 주문 넣는 함수 호출로 확장
-            # place_victoria_order(driver, target_price, ...)
+                time.sleep(FOLLOW_UPDATE_SEC)
 
-            time.sleep(FOLLOW_UPDATE_SEC)
+            except KeyboardInterrupt:
+                print("\nStopped by user. Returning to menu...")
+                return
 
-        except KeyboardInterrupt:
-            print("\n사용자에 의해 중단됨.")
-            break
-        except Exception as e:
-            print("[추종모드 오류]:", e)
-            time.sleep(2)
+    finally:
+        driver.quit()
+        print("Driver shutdown complete.")
 
 
 # -------------------------------------------------
 #  main() — 실행 시작점
 # -------------------------------------------------
 def main():
-    driver = init_driver()
-    try:
-        driver.get(f"{VICTORIA_URL}/account/login")
-        print("\n" + "=" * 45)
-        print("         💎 VictoriaEX 연결 완료 💎")
-        print("  로그인 후 Enter 키를 눌러 계속 진행하세요.")
-        print("=" * 45 + "\n")
-        input()
 
-        print("\n실행 모드 선택:")
-        print("1) VictoriaEX 호가창 출력")
-        print("2) Binance BTCUSDT 추종 모드")
-        mode = input("선택(1~2): ").strip()
+    print("\n" + "=" * 45)
+    print("         💎 Connected to VictoriaEX 💎")
+    print("  Press Enter after logging in to continue.")
+    print("=" * 45 + "\n")
+    input()
 
-        if mode == "1":
-            run_orderbook(driver, VICTORIA_URL, ORDERBOOK_REFRESH_INTERVAL)
-        elif mode == "2":
-            run_follow_binance(driver)
-        else:
-            print("잘못된 입력입니다. 1 또는 2를 입력하세요.")
+    while True:
+        try:
+            print("\n⚙️  Mode:")
+            print("1) Show Order Book (VictoriaEX)")
+            print("2) Binance-Referenced MM Mode")
+            print("q) Quit")
 
-    finally:
-        driver.quit()
-        print("드라이버 종료 완료.")
+            mode = input("\n👉  Select (1/2/q): ").strip().lower()
+
+            if mode == "1":
+                run_victoria_orderbook_mode(VICTORIA_URL, ORDERBOOK_REFRESH_INTERVAL)
+
+            elif mode == "2":
+                run_binance_referenced_mm_mode()
+
+            elif mode == "q":
+                print("Exiting...")
+                break
+
+            else:
+                print("Invalid input. Please enter 1, 2, or q.")
+
+        except KeyboardInterrupt:
+            print("\nInterrupted. Returning to menu...")
+            continue
+
+    print("Driver shutdown complete.")
 
 
 # -------------------------------------------------
