@@ -1,0 +1,14 @@
+# 보안 파일들 절대 GitHub에 올리지 않기
+.env
+*.env
+
+# 파이썬 캐시, 가상환경 등 (보너스)
+__pycache__/
+*.pyc
+venv/
+.env.local
+.env.production
+
+# 윈도우 쓰시면 추가로
+Thumbs.db
+Desktop.ini
