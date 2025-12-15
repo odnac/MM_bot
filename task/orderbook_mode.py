@@ -1,8 +1,10 @@
+# orderbook_mode.py
 import time
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from driver_utils import init_driver
+from utils import clear_console
 
 
 # -------------------------------------------------
@@ -107,17 +109,19 @@ def run_victoria_orderbook_mode(victoria_url: str, refresh_interval: float = 10)
 
     try:
         driver.get(f"{victoria_url}/account/login")
-        print("\n💎 Connected to VictoriaEX 💎")
-        input("Login and press Enter to continue...")
 
-        # 트레이드 페이지 이동
+        print("\n" + "=" * 45)
+        print("         💎 Connected to VictoriaEX 💎")
+        print("  Press Enter after logging in to continue.")
+        print("=" * 45 + "\n")
+        input()
+
         driver.get(f"{victoria_url}/trade")
-
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "a.bidding-table-rows"))
         )
 
-        print("\n[Mode 1] Show VictoriaEX Order Book\n")
+        print("\n[Mode 1] Show VictoriaEX Order Book\n\n")
 
         while True:
             try:
@@ -127,6 +131,7 @@ def run_victoria_orderbook_mode(victoria_url: str, refresh_interval: float = 10)
                     continue
 
                 coin_name, coin_ticker, last_price, asks, bids = snapshot
+                clear_console()
                 print_orderbook(coin_name, coin_ticker, last_price, asks, bids)
 
                 time.sleep(refresh_interval)
