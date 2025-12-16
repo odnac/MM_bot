@@ -1,0 +1,391 @@
+# follow_mm_mode.py
+import random
+import time
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Literal, List, Optional
+from selenium.common.exceptions import (
+    StaleElementReferenceException,
+    WebDriverException,
+)
+from .driver_utils import init_driver
+from .config import (
+    DISCOUNT_MIN,
+    DISCOUNT_MAX,
+    MM_LEVELS,
+    MM_REBASE_INTERVAL_SEC,
+    MM_TOPUP_INTERVAL_SEC,
+    MM_STEP_PERCENT,
+    MM_CANCEL_ROW_TIMEOUT_SEC,
+    MM_MAX_CANCEL_OPS_PER_CYCLE,
+    MM_BUY_BUDGET_RATIO,
+    MM_SELL_QTY_RATIO,
+    MM_TOAST_WAIT_SEC,
+)
+from .victoria_balance import get_free_usdt, get_free_coin_qty
+from .victoria_trade import place_limit_order
+from .victoria_orders import read_open_orders_side, cancel_order_row, OrderRow
+from .print_referenced_price_mode import print_binance_referenced_price_mode
+from .utils import wait_for_manual_login
+
+
+Side = Literal["bid", "ask"]
+
+
+@dataclass(frozen=True)
+class EngineConfig:
+    levels: int
+    rebase_interval_sec: int
+    topup_interval_sec: int
+    step_percent: float
+
+    cancel_row_timeout_sec: int
+    max_cancel_ops_per_cycle: int
+
+    buy_budget_ratio: float
+    sell_qty_ratio: float
+
+    toast_wait_sec: float
+
+
+# ---------------------------
+#     .env → config.py 에서 읽은 MM 설정값들을
+#    FollowMMEngine 전용 EngineConfig로 조립한다.
+# ---------------------------
+def _build_cfg() -> EngineConfig:
+    return EngineConfig(
+        levels=MM_LEVELS,
+        rebase_interval_sec=MM_REBASE_INTERVAL_SEC,
+        topup_interval_sec=MM_TOPUP_INTERVAL_SEC,
+        step_percent=MM_STEP_PERCENT,
+        cancel_row_timeout_sec=MM_CANCEL_ROW_TIMEOUT_SEC,
+        max_cancel_ops_per_cycle=MM_MAX_CANCEL_OPS_PER_CYCLE,
+        buy_budget_ratio=MM_BUY_BUDGET_RATIO,
+        sell_qty_ratio=MM_SELL_QTY_RATIO,
+        toast_wait_sec=MM_TOAST_WAIT_SEC,
+    )
+
+
+# ---------------------------
+# Utils
+# ---------------------------
+def _now() -> float:
+    return time.time()
+
+
+def _step_ratio(step_percent: float) -> float:
+    # 0.2 -> 0.002
+    return step_percent / 100.0
+
+
+def _parse_binance_last() -> float:
+    """
+    네가 가진 print_binance_referenced_price_mode()가 '값을 반환'하면 그대로 쓰면 되고,
+    print만 한다면 해당 함수 내부 로직을 'return float(last)' 형태로 바꾸는 걸 추천.
+
+    여기서는 "반환값이 float 또는 숫자 문자열"이라고 가정하고 처리.
+    """
+    v = print_binance_referenced_price_mode()
+    if isinstance(v, (int, float)):
+        return float(v)
+    # 문자열이면 숫자만 뽑기
+    s = str(v).strip().replace(",", "")
+    return float(s)
+
+
+def _normalize_price(price: float) -> float:
+    """
+    tick size를 정확히 모르면 일단 소수 3자리로 맞추는 게 UI에 잘 맞는 경우가 많음.
+    (너 스샷이 89,764.000 형태)
+    """
+    return round(float(price), 3)
+
+
+def _normalize_qty(qty: float) -> float:
+    """
+    BTC 수량은 보통 8자리면 충분.
+    """
+    return round(float(qty), 8)
+
+
+def _weights_pyramid(n: int) -> List[float]:
+    # 1..n (합 1)
+    raw = list(range(1, n + 1))
+    s = sum(raw)
+    return [r / s for r in raw]
+
+
+def _weights_inverse_pyramid(n: int) -> List[float]:
+    raw = list(range(n, 0, -1))
+    s = sum(raw)
+    return [r / s for r in raw]
+
+
+def _sleep_tiny():
+    time.sleep(0.15)
+
+
+def _maybe_wait_toast(cfg: EngineConfig):
+    """
+    TODO: 나중에 토스트 CSS 주면 여기서 '토스트 나타남->사라짐' 대기 로직을 붙이면 됨.
+    지금은 옵션으로만 두고 기본 0초.
+    """
+    if cfg.toast_wait_sec and cfg.toast_wait_sec > 0:
+        time.sleep(cfg.toast_wait_sec)
+
+
+# ---------------------------
+# Core engine
+# ---------------------------
+class FollowMMEngine:
+    """
+    모드3(매수) / 모드4(매도)
+    - 10분마다 Rebase: binance last 갱신 + (가격순 pruning) + 15개 채움
+    - 60초마다 Top-up: 가격 갱신 없이 15개 유지 (체결로 비었을 때만 바깥쪽 연장)
+    """
+
+    def __init__(self, driver, side: Side, cfg: EngineConfig):
+        self.driver = driver
+        self.side = side
+        self.cfg = cfg
+
+        self._step = _step_ratio(cfg.step_percent)
+        self._anchor_price: Optional[float] = None
+        self._discount_for_cycle: Optional[float] = None  # ratio (0.01 = 1%)
+        self._last_rebase_ts = 0.0
+        self._last_topup_ts = 0.0
+        self._rebase_lock = False
+
+    def run_forever(self):
+        # 시작 즉시 1회
+        self.rebase()
+
+        while True:
+            now = _now()
+
+            if now - self._last_rebase_ts >= self.cfg.rebase_interval_sec:
+                self.rebase()
+
+            if (not self._rebase_lock) and (
+                now - self._last_topup_ts >= self.cfg.topup_interval_sec
+            ):
+                self.topup()
+
+            time.sleep(0.5)
+
+    # ----------------
+    # Rebase
+    # ----------------
+    def rebase(self):
+        self._rebase_lock = True
+        try:
+            # 1) 기준가 갱신
+            ref = _parse_binance_last()
+            self._anchor_price = float(ref)
+
+            # 2) discount 새로 뽑기 (이 사이클 고정)
+            self._discount_for_cycle = (
+                random.uniform(DISCOUNT_MIN, DISCOUNT_MAX) / 100.0
+            )
+
+            # 3) 가격순 pruning: "15개만 남기고" 바깥쪽 취소
+            self._prune_keep_15()
+
+            # 4) 부족분 채우기(15개)
+            self._fill_to_15()
+
+            self._last_rebase_ts = _now()
+        finally:
+            self._rebase_lock = False
+
+    # ----------------
+    # Topup
+    # ----------------
+    def topup(self):
+        # 가격 갱신 없음
+        if self._anchor_price is None or self._discount_for_cycle is None:
+            # 안전하게 rebase로 복구
+            self.rebase()
+            return
+
+        self._fill_to_15()
+        self._last_topup_ts = _now()
+
+    # ----------------
+    # Internal ops
+    # ----------------
+    def _prune_keep_15(self):
+        rows = read_open_orders_side(self.driver, self.side)
+
+        if len(rows) <= self.cfg.levels:
+            return
+
+        # 매도: 낮은 가격 15개 유지, 높은 것부터 취소
+        # 매수: 높은 가격 15개 유지, 낮은 것부터 취소
+        if self.side == "ask":
+            rows_sorted = sorted(rows, key=lambda r: r.price)  # low -> high
+            cancel = rows_sorted[self.cfg.levels :]  # high side
+            cancel = sorted(cancel, key=lambda r: r.price, reverse=True)
+        else:
+            rows_sorted = sorted(
+                rows, key=lambda r: r.price, reverse=True
+            )  # high -> low
+            cancel = rows_sorted[self.cfg.levels :]  # low side
+            cancel = sorted(cancel, key=lambda r: r.price)
+
+        ops = 0
+        for row in cancel:
+            if ops >= self.cfg.max_cancel_ops_per_cycle:
+                break
+            try:
+                cancel_order_row(
+                    self.driver, row, timeout=self.cfg.cancel_row_timeout_sec
+                )
+                _maybe_wait_toast(self.cfg)  # TODO: 토스트 CSS 적용 시 의미 생김
+                ops += 1
+            except (StaleElementReferenceException, WebDriverException):
+                # UI가 흔들리면 다음 사이클에서 다시 맞춰짐
+                continue
+
+    def _fill_to_15(self):
+        rows = read_open_orders_side(self.driver, self.side)
+        need = self.cfg.levels - len(rows)
+        if need <= 0:
+            return
+
+        # 완전 비어있으면 anchor 기반으로 full ladder 생성
+        if len(rows) == 0:
+            prices = self._build_full_ladder_prices()
+            self._place_ladder(prices)
+            return
+
+        # “앞쪽이 먹히면 당겨지고 바깥쪽이 채워짐” 구현:
+        # - ask: 남아있는 것 중 최고가(max) 기준으로 (1+step)^k로 바깥쪽(더 높은) 생성
+        # - bid: 남아있는 것 중 최저가(min) 기준으로 (1-step)^k로 바깥쪽(더 낮은) 생성
+        if self.side == "ask":
+            outer = max(r.price for r in rows)
+            new_prices = [
+                _normalize_price(outer * ((1 + self._step) ** i))
+                for i in range(1, need + 1)
+            ]
+        else:
+            outer = min(r.price for r in rows)
+            new_prices = [
+                _normalize_price(outer * ((1 - self._step) ** i))
+                for i in range(1, need + 1)
+            ]
+
+        self._place_ladder(new_prices)
+
+    def _build_full_ladder_prices(self) -> List[float]:
+        assert self._anchor_price is not None
+        assert self._discount_for_cycle is not None
+
+        p1 = _normalize_price(self._anchor_price)
+        d = self._discount_for_cycle
+        s = self._step
+
+        prices: List[float] = [p1]
+
+        if self.side == "bid":
+            # 2..15 : anchor*(1-d) * (1-s)^(k-2)
+            base = p1 * (1 - d)
+            for k in range(2, self.cfg.levels + 1):
+                pk = base * ((1 - s) ** (k - 2))
+                prices.append(_normalize_price(pk))
+        else:
+            # 매도는 "바이낸스보다 비싸게" 가는 안전형으로 설정
+            # (만약 싸게 던지는 전략이면 (1 - d)로 바꾸면 됨)
+            base = p1 * (1 + d)
+            for k in range(2, self.cfg.levels + 1):
+                pk = base * ((1 + s) ** (k - 2))
+                prices.append(_normalize_price(pk))
+
+        return prices
+
+    def _place_ladder(self, prices: List[float]):
+        """
+        - bid(매수): 피라미드(가까울수록 적게, 멀수록 많게) / 기준: USDT
+        - ask(매도): 역피라미드(가까울수록 많게, 멀수록 적게) / 기준: 코인수량
+        """
+        if not prices:
+            return
+
+        if self.side == "bid":
+            usdt = get_free_usdt(self.driver) * self.cfg.buy_budget_ratio
+            weights = _weights_pyramid(len(prices))
+            for price, w in zip(prices, weights):
+                budget = usdt * w
+                qty = _normalize_qty(budget / price)
+                if qty <= 0:
+                    continue
+                place_limit_order(self.driver, "bid", price, qty)
+                _maybe_wait_toast(self.cfg)
+                _sleep_tiny()
+        else:
+            coin = get_free_coin_qty(self.driver) * self.cfg.sell_qty_ratio
+            weights = _weights_inverse_pyramid(len(prices))
+            for price, w in zip(prices, weights):
+                qty = _normalize_qty(coin * w)
+                if qty <= 0:
+                    continue
+                place_limit_order(self.driver, "ask", price, qty)
+                _maybe_wait_toast(self.cfg)
+                _sleep_tiny()
+
+
+# ---------------------------
+# main.py에서 호출할 엔트리
+# ---------------------------
+def run_follow_mm_bid(victoria_url: str):
+    cfg = _build_cfg()
+    driver = init_driver()
+
+    try:
+        driver.get(f"{victoria_url}/account/login")
+
+        wait_for_manual_login()
+        print("\n[Mode 3] Follow MM (BID)\n\n")
+
+        driver.get(f"{victoria_url}/trade")
+
+        FollowMMEngine(driver=driver, side="bid", cfg=cfg).run_forever()
+
+    except KeyboardInterrupt:
+        print("\n[INFO] Follow MM BID stopped by user (KeyboardInterrupt)")
+
+    except Exception as e:
+        print(f"\n[ERROR] Follow MM BID crashed: {type(e).__name__} - {e}")
+
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        print("[INFO] Driver shutdown complete.")
+
+
+def run_follow_mm_ask(victoria_url: str):
+    cfg = _build_cfg()
+    driver = init_driver()
+
+    try:
+        driver.get(f"{victoria_url}/account/login")
+        wait_for_manual_login()
+        print("\n[Mode 4] Follow MM (ASK)\n\n")
+        driver.get(f"{victoria_url}/trade")
+
+        FollowMMEngine(driver=driver, side="ask", cfg=cfg).run_forever()
+
+    except KeyboardInterrupt:
+        print("\n[INFO] Follow MM ASK stopped by user (KeyboardInterrupt)")
+
+    except Exception as e:
+        print(f"\n[ERROR] Follow MM ASK crashed: {type(e).__name__} - {e}")
+
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        print("[INFO] Driver shutdown complete.")

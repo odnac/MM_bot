@@ -5,8 +5,10 @@ import requests
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from driver_utils import init_driver
-from utils import clear_console
+from .driver_utils import init_driver
+from .utils import clear_console
+from .utils import wait_for_manual_login
+from .config import DISCOUNT_MIN, DISCOUNT_MAX, FOLLOW_UPDATE_SEC
 
 
 # -------------------------------------------------
@@ -30,29 +32,17 @@ def get_current_binance_symbol_from_victoria(driver) -> str:
 # -------------------------------------------------
 #  바이낸스 레퍼런스 가격 출력 모드 (모드 2)
 # -------------------------------------------------
-def print_binance_referenced_price_mode(
-    VICTORIA_URL: str,
-    DISCOUNT_MIN: float,
-    DISCOUNT_MAX: float,
-    FOLLOW_UPDATE_SEC: int,
-):
+def print_binance_referenced_price_mode(VICTORIA_URL: str):
 
     driver = init_driver()
 
     try:
         driver.get(f"{VICTORIA_URL}/account/login")
-
-        print("\n" + "=" * 45)
-        print("         💎 Connected to VictoriaEX 💎")
-        print("  Press Enter after logging in to continue.")
-        print("=" * 45 + "\n")
-        input()
-
+        wait_for_manual_login()
         driver.get(f"{VICTORIA_URL}/trade")
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "b.pair-title"))
         )
-
         print("\n[Mode 2] Print Binance-Referenced Price Mode Started\n")
 
         while True:
@@ -85,6 +75,3 @@ def print_binance_referenced_price_mode(
     finally:
         driver.quit()
         print("Driver shutdown complete.")
-
-
-#  def run_binance_referenced_mm_mode():

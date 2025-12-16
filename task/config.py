@@ -7,10 +7,9 @@ from dotenv import load_dotenv
 # -------------------------------------------------
 load_dotenv()
 
+
 CHROME_DRIVER_PATH = os.getenv("CHROME_DRIVER_PATH")
 VICTORIA_URL = os.getenv("VICTORIA_URL")
-BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
-BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 
 def get_env_float(key: str) -> float:
@@ -27,8 +26,18 @@ def get_env_int(key: str) -> int:
     return int(value)
 
 
+ORDERBOOK_REFRESH_INTERVAL = get_env_float("ORDERBOOK_REFRESH_INTERVAL")
+
 DISCOUNT_MIN = get_env_float("DISCOUNT_MIN")
 DISCOUNT_MAX = get_env_float("DISCOUNT_MAX")
 FOLLOW_UPDATE_SEC = get_env_int("FOLLOW_UPDATE_SEC")
 
-ORDERBOOK_REFRESH_INTERVAL = 10  # seconds
+MM_LEVELS = get_env_int("MM_LEVELS")
+MM_REBASE_INTERVAL_SEC = get_env_int("MM_REBASE_INTERVAL_SEC")
+MM_TOPUP_INTERVAL_SEC = get_env_int("MM_TOPUP_INTERVAL_SEC")
+MM_STEP_PERCENT = get_env_float("MM_STEP_PERCENT")
+MM_CANCEL_ROW_TIMEOUT_SEC = get_env_int("MM_CANCEL_ROW_TIMEOUT_SEC")
+MM_MAX_CANCEL_OPS_PER_CYCLE = get_env_int("MM_MAX_CANCEL_OPS_PER_CYCLE")
+MM_BUY_BUDGET_RATIO = get_env_float("MM_BUY_BUDGET_RATIO")
+MM_SELL_QTY_RATIO = get_env_float("MM_SELL_QTY_RATIO")
+MM_TOAST_WAIT_SEC = get_env_float("MM_TOAST_WAIT_SEC")

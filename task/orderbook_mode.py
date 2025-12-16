@@ -3,8 +3,10 @@ import time
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from driver_utils import init_driver
-from utils import clear_console
+from .driver_utils import init_driver
+from .utils import clear_console
+from .utils import wait_for_manual_login
+from .config import ORDERBOOK_REFRESH_INTERVAL
 
 
 # -------------------------------------------------
@@ -103,24 +105,17 @@ def print_orderbook(coin_name, coin_ticker, last_price, asks, bids):
 # -------------------------------------------------
 #  실시간 호가창 루프 (Mode 1)
 # -------------------------------------------------
-def run_victoria_orderbook_mode(victoria_url: str, refresh_interval: float = 10):
+def run_victoria_orderbook_mode(victoria_url: str):
 
     driver = init_driver()
 
     try:
         driver.get(f"{victoria_url}/account/login")
-
-        print("\n" + "=" * 45)
-        print("         💎 Connected to VictoriaEX 💎")
-        print("  Press Enter after logging in to continue.")
-        print("=" * 45 + "\n")
-        input()
-
+        wait_for_manual_login()
         driver.get(f"{victoria_url}/trade")
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "a.bidding-table-rows"))
         )
-
         print("\n[Mode 1] Show VictoriaEX Order Book\n\n")
 
         while True:
@@ -134,7 +129,7 @@ def run_victoria_orderbook_mode(victoria_url: str, refresh_interval: float = 10)
                 clear_console()
                 print_orderbook(coin_name, coin_ticker, last_price, asks, bids)
 
-                time.sleep(refresh_interval)
+                time.sleep(ORDERBOOK_REFRESH_INTERVAL)
 
             except KeyboardInterrupt:
                 print("\nStopped by user. Returning to menu...")
