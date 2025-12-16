@@ -1,15 +1,18 @@
 # follow_mm_mode.py
+from __future__ import annotations
+
 import random
 import time
-from __future__ import annotations
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from dataclasses import dataclass
 from typing import Literal, List, Optional
 from selenium.common.exceptions import (
     StaleElementReferenceException,
     WebDriverException,
 )
-from .driver_utils import init_driver
-from .config import (
+from config import (
     DISCOUNT_MIN,
     DISCOUNT_MAX,
     MM_LEVELS,
@@ -22,11 +25,12 @@ from .config import (
     MM_SELL_QTY_RATIO,
     MM_TOAST_WAIT_SEC,
 )
-from .victoria_balance import get_free_usdt, get_free_coin_qty
-from .victoria_trade import place_limit_order
-from .victoria_orders import read_open_orders_side, cancel_order_row, OrderRow
-from .print_referenced_price_mode import print_binance_referenced_price_mode
-from .utils import wait_for_manual_login
+from modes.driver_utils import init_driver
+from modes.mm.victoria_balance import get_free_usdt, get_free_coin_qty
+from modes.mm.victoria_trade import place_limit_order
+from modes.mm.victoria_orders import read_open_orders_side, cancel_order_row, OrderRow
+from modes.utils import wait_for_manual_login
+from modes.market_data import get_binance_last_from_ticker
 
 
 Side = Literal["bid", "ask"]
@@ -38,20 +42,13 @@ class EngineConfig:
     rebase_interval_sec: int
     topup_interval_sec: int
     step_percent: float
-
     cancel_row_timeout_sec: int
     max_cancel_ops_per_cycle: int
-
     buy_budget_ratio: float
     sell_qty_ratio: float
-
     toast_wait_sec: float
 
 
-# ---------------------------
-#     .env → config.py 에서 읽은 MM 설정값들을
-#    FollowMMEngine 전용 EngineConfig로 조립한다.
-# ---------------------------
 def _build_cfg() -> EngineConfig:
     return EngineConfig(
         levels=MM_LEVELS,
@@ -66,9 +63,6 @@ def _build_cfg() -> EngineConfig:
     )
 
 
-# ---------------------------
-# Utils
-# ---------------------------
 def _now() -> float:
     return time.time()
 
@@ -76,21 +70,6 @@ def _now() -> float:
 def _step_ratio(step_percent: float) -> float:
     # 0.2 -> 0.002
     return step_percent / 100.0
-
-
-def _parse_binance_last() -> float:
-    """
-    네가 가진 print_binance_referenced_price_mode()가 '값을 반환'하면 그대로 쓰면 되고,
-    print만 한다면 해당 함수 내부 로직을 'return float(last)' 형태로 바꾸는 걸 추천.
-
-    여기서는 "반환값이 float 또는 숫자 문자열"이라고 가정하고 처리.
-    """
-    v = print_binance_referenced_price_mode()
-    if isinstance(v, (int, float)):
-        return float(v)
-    # 문자열이면 숫자만 뽑기
-    s = str(v).strip().replace(",", "")
-    return float(s)
 
 
 def _normalize_price(price: float) -> float:
@@ -134,6 +113,10 @@ def _maybe_wait_toast(cfg: EngineConfig):
         time.sleep(cfg.toast_wait_sec)
 
 
+def _victoria_trade_url(victoria_url: str, ticker: str) -> str:
+    return f"{victoria_url}/trade?code=USDT-{ticker.upper()}"
+
+
 # ---------------------------
 # Core engine
 # ---------------------------
@@ -144,10 +127,11 @@ class FollowMMEngine:
     - 60초마다 Top-up: 가격 갱신 없이 15개 유지 (체결로 비었을 때만 바깥쪽 연장)
     """
 
-    def __init__(self, driver, side: Side, cfg: EngineConfig):
+    def __init__(self, driver, side: Side, cfg: EngineConfig, ticker: str):
         self.driver = driver
         self.side = side
         self.cfg = cfg
+        self.ticker = ticker.upper()
 
         self._step = _step_ratio(cfg.step_percent)
         self._anchor_price: Optional[float] = None
@@ -180,8 +164,7 @@ class FollowMMEngine:
         self._rebase_lock = True
         try:
             # 1) 기준가 갱신
-            ref = _parse_binance_last()
-            self._anchor_price = float(ref)
+            self._anchor_price = get_binance_last_from_ticker(self.ticker)
 
             # 2) discount 새로 뽑기 (이 사이클 고정)
             self._discount_for_cycle = (
@@ -334,20 +317,19 @@ class FollowMMEngine:
                 _sleep_tiny()
 
 
-# ---------------------------
-# main.py에서 호출할 엔트리
-# ---------------------------
-def run_follow_mm_bid(victoria_url: str):
+def run_follow_mm_bid(victoria_url: str, ticker: str):
     cfg = _build_cfg()
     driver = init_driver()
 
     try:
         driver.get(f"{victoria_url}/account/login")
 
-        wait_for_manual_login()
-        print("\n[Mode 3] Follow MM (BID)\n\n")
+        wait_for_manual_login(3)
 
-        driver.get(f"{victoria_url}/trade")
+        driver.get(_victoria_trade_url(victoria_url, ticker))
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.ID, "user_base_trans"))
+        )
 
         FollowMMEngine(driver=driver, side="bid", cfg=cfg).run_forever()
 
@@ -365,15 +347,19 @@ def run_follow_mm_bid(victoria_url: str):
         print("[INFO] Driver shutdown complete.")
 
 
-def run_follow_mm_ask(victoria_url: str):
+def run_follow_mm_ask(victoria_url: str, ticker: str):
     cfg = _build_cfg()
     driver = init_driver()
 
     try:
         driver.get(f"{victoria_url}/account/login")
-        wait_for_manual_login()
-        print("\n[Mode 4] Follow MM (ASK)\n\n")
-        driver.get(f"{victoria_url}/trade")
+
+        wait_for_manual_login(4)
+
+        driver.get(_victoria_trade_url(victoria_url, ticker))
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "user_base_coin"))
+        )
 
         FollowMMEngine(driver=driver, side="ask", cfg=cfg).run_forever()
 
@@ -389,3 +375,8 @@ def run_follow_mm_ask(victoria_url: str):
         except Exception:
             pass
         print("[INFO] Driver shutdown complete.")
+
+
+# 500,000
+# 16,000,000
+# 11,000,000

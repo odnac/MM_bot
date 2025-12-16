@@ -10,9 +10,6 @@ if not CHROME_DRIVER_PATH:
     raise RuntimeError("[ERROR] CHROME_DRIVER_PATH is not set in .env file.")
 
 
-# # -------------------------------------------------
-# #  드라이버 초기화
-# # -------------------------------------------------
 def init_driver():
     options = Options()
     options.add_argument("--no-sandbox")

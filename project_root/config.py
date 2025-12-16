@@ -2,11 +2,8 @@
 import os
 from dotenv import load_dotenv
 
-# -------------------------------------------------
-#  .env 로드 및 환경 변수 관리
-# -------------------------------------------------
-load_dotenv()
 
+load_dotenv()
 
 CHROME_DRIVER_PATH = os.getenv("CHROME_DRIVER_PATH")
 VICTORIA_URL = os.getenv("VICTORIA_URL")

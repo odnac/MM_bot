@@ -5,15 +5,12 @@ import requests
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from .driver_utils import init_driver
-from .utils import clear_console
-from .utils import wait_for_manual_login
-from .config import DISCOUNT_MIN, DISCOUNT_MAX, FOLLOW_UPDATE_SEC
+from modes.driver_utils import init_driver
+from modes.utils import clear_console
+from modes.utils import wait_for_manual_login
+from config import DISCOUNT_MIN, DISCOUNT_MAX, FOLLOW_UPDATE_SEC
 
 
-# -------------------------------------------------
-#   Binance 가격 가져오기
-# -------------------------------------------------
 def get_binance_price(symbol: str) -> float:
     url = "https://api.binance.com/api/v3/ticker/price"
     r = requests.get(url, params={"symbol": symbol}, timeout=10)
@@ -21,29 +18,24 @@ def get_binance_price(symbol: str) -> float:
     return float(r.json()["price"])
 
 
-# -------------------------------------------------
-#   VictoriaEX 현재 심볼을 Binance 심볼로 변환
-# -------------------------------------------------
 def get_current_binance_symbol_from_victoria(driver) -> str:
     unit_text = driver.find_element(By.CSS_SELECTOR, "span.unit").text.strip()
     return unit_text.replace("/", "").upper()
 
 
-# -------------------------------------------------
-#  바이낸스 레퍼런스 가격 출력 모드 (모드 2)
-# -------------------------------------------------
 def print_binance_referenced_price_mode(VICTORIA_URL: str):
 
     driver = init_driver()
 
     try:
         driver.get(f"{VICTORIA_URL}/account/login")
-        wait_for_manual_login()
+
+        wait_for_manual_login(2)
+
         driver.get(f"{VICTORIA_URL}/trade")
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "b.pair-title"))
         )
-        print("\n[Mode 2] Print Binance-Referenced Price Mode Started\n")
 
         while True:
             try:
