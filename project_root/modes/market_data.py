@@ -1,13 +1,37 @@
 # modes/market_data.py
+import time
 import requests
+from typing import Optional
+
+BINANCE_PRICE_API_URL = "https://api.binance.com/api/v3/ticker/price"
 
 
-def get_binance_last_from_ticker(ticker: str) -> float:
-    symbol = f"{ticker.upper()}USDT"
+def get_binance_price(
+    symbol: str, max_retries: int = 5, base_delay: float = 0.5
+) -> float:
+    # mode 1, 3/4
+    last_exc: Optional[Exception] = None
 
-    url = "https://api.binance.com/api/v3/ticker/price"
+    for attempt in range(1, max_retries + 1):
+        try:
+            r = requests.get(
+                BINANCE_PRICE_API_URL, params={"symbol": symbol}, timeout=10
+            )
+            r.raise_for_status()
+            return float(r.json()["price"])
 
-    r = requests.get(url, params={"symbol": symbol}, timeout=10)
-    r.raise_for_status()
+        except (requests.RequestException, ValueError) as e:
+            last_exc = e
+            if attempt == max_retries:
+                break
 
-    return float(r.json()["price"])
+            sleep_sec = base_delay * (2 ** (attempt - 1))
+            print(
+                f"[WARN] Binance price fetch failed "
+                f"(attempt {attempt}/{max_retries}) → retry in {sleep_sec:.1f}s"
+            )
+            time.sleep(sleep_sec)
+
+    raise RuntimeError(
+        f"Binance price fetch failed after {max_retries} retries"
+    ) from last_exc

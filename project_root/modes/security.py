@@ -1,6 +1,8 @@
 # security.py
 import os
 import getpass
+from selenium.common.exceptions import NoSuchElementException
+from selenium.webdriver.common.by import By
 
 
 def check_password():
@@ -17,3 +19,19 @@ def check_password():
 
     print("✅ Access granted!")
     return True
+
+
+def check_login_success(driver) -> bool:
+    if False:
+        try:
+            driver.find_element(
+                By.CSS_SELECTOR,
+                'li.nav-item[data-access="login"] button.dropdown-toggle',
+            )
+            return True
+
+        except NoSuchElementException:
+            return False
+
+    else:
+        return True

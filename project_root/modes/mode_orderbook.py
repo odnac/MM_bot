@@ -3,13 +3,13 @@ import time
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from modes.driver_utils import init_driver
-from modes.utils import clear_console
-from modes.utils import wait_for_manual_login
+from modes.utils_driver import init_driver
+from modes.utils_ui import clear_console
+from modes.utils_ui import validate_login_or_exit
 from config import ORDERBOOK_REFRESH_INTERVAL
 
 
-def parse_rows(rows):
+def _parse_rows(rows):
     prices, amounts = [], []
     for row in rows:
         try:
@@ -31,7 +31,7 @@ def parse_rows(rows):
     return prices, amounts
 
 
-def get_victoria_last_price(driver) -> float:
+def _get_victoria_last_price(driver) -> float:
     price_text = (
         driver.find_element(
             By.CSS_SELECTOR, "div.overturn-cell.col-price span.contrast"
@@ -42,7 +42,7 @@ def get_victoria_last_price(driver) -> float:
     return float(price_text)
 
 
-def fetch_victoria_orderbook_snapshot(driver):
+def _fetch_victoria_orderbook_snapshot(driver):
     ask_rows = driver.find_elements(
         By.CSS_SELECTOR, "#mCSB_2_container > a.bidding-table-rows"
     )
@@ -50,8 +50,8 @@ def fetch_victoria_orderbook_snapshot(driver):
         By.CSS_SELECTOR, "#mCSB_3_container > a.bidding-table-rows"
     )
 
-    ask_prices, ask_amounts = parse_rows(ask_rows)
-    bid_prices, bid_amounts = parse_rows(bid_rows)
+    ask_prices, ask_amounts = _parse_rows(ask_rows)
+    bid_prices, bid_amounts = _parse_rows(bid_rows)
 
     coin_name = driver.find_element(By.CSS_SELECTOR, "b.pair-title").text.strip()
     ticker_text = driver.find_element(By.CSS_SELECTOR, "span.unit").text.strip()
@@ -67,13 +67,12 @@ def fetch_victoria_orderbook_snapshot(driver):
     asks = asks_sorted[-10:]
     bids = bids_sorted[:10]
 
-    last_price = get_victoria_last_price(driver)
+    last_price = _get_victoria_last_price(driver)
 
     return coin_name, coin_ticker, last_price, asks, bids
 
 
-def print_orderbook(coin_name, coin_ticker, last_price, asks, bids):
-
+def _print_orderbook(coin_name, coin_ticker, last_price, asks, bids):
     print(f"┌───────────── {time.strftime('%H:%M:%S')}  {coin_ticker} ─────────────┐")
 
     print("")
@@ -96,7 +95,7 @@ def run_victoria_orderbook_mode(victoria_url: str):
     try:
         driver.get(f"{victoria_url}/account/login")
 
-        wait_for_manual_login(1)
+        validate_login_or_exit(driver=driver, mode=1)
 
         driver.get(f"{victoria_url}/trade")
         WebDriverWait(driver, 20).until(
@@ -105,14 +104,14 @@ def run_victoria_orderbook_mode(victoria_url: str):
 
         while True:
             try:
-                snapshot = fetch_victoria_orderbook_snapshot(driver)
+                snapshot = _fetch_victoria_orderbook_snapshot(driver)
                 if snapshot is None:
                     time.sleep(0.5)
                     continue
 
                 coin_name, coin_ticker, last_price, asks, bids = snapshot
                 clear_console()
-                print_orderbook(coin_name, coin_ticker, last_price, asks, bids)
+                _print_orderbook(coin_name, coin_ticker, last_price, asks, bids)
 
                 time.sleep(ORDERBOOK_REFRESH_INTERVAL)
 

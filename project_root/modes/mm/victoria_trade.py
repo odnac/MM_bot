@@ -26,6 +26,7 @@ def place_limit_order(
     price: USDT 가격
     qty: BTC 수량
     """
+
     if qty <= 0 or price <= 0:
         return False
 
@@ -52,6 +53,5 @@ def place_limit_order(
     else:
         raise ValueError(f"unknown side: {side}")
 
-    # 너무 빠르게 연속 클릭하면 UI가 씹히는 경우가 있어서 아주 짧게 텀
     time.sleep(0.15)
     return True

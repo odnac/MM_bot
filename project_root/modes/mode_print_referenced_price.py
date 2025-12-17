@@ -1,36 +1,28 @@
 # referenced_mm_mode.py
 import time
 import random
-import requests
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from modes.driver_utils import init_driver
-from modes.utils import clear_console
-from modes.utils import wait_for_manual_login
+from modes.utils_driver import init_driver
+from modes.utils_ui import clear_console
+from modes.utils_ui import validate_login_or_exit
+from modes.market_data import get_binance_price
 from config import DISCOUNT_MIN, DISCOUNT_MAX, FOLLOW_UPDATE_SEC
 
 
-def get_binance_price(symbol: str) -> float:
-    url = "https://api.binance.com/api/v3/ticker/price"
-    r = requests.get(url, params={"symbol": symbol}, timeout=10)
-    r.raise_for_status()
-    return float(r.json()["price"])
-
-
-def get_current_binance_symbol_from_victoria(driver) -> str:
+def _get_current_binance_symbol_from_victoria(driver) -> str:
     unit_text = driver.find_element(By.CSS_SELECTOR, "span.unit").text.strip()
     return unit_text.replace("/", "").upper()
 
 
 def print_binance_referenced_price_mode(VICTORIA_URL: str):
-
     driver = init_driver()
 
     try:
         driver.get(f"{VICTORIA_URL}/account/login")
 
-        wait_for_manual_login(2)
+        validate_login_or_exit(driver=driver, mode=2)
 
         driver.get(f"{VICTORIA_URL}/trade")
         WebDriverWait(driver, 20).until(
@@ -39,7 +31,7 @@ def print_binance_referenced_price_mode(VICTORIA_URL: str):
 
         while True:
             try:
-                symbol = get_current_binance_symbol_from_victoria(driver)
+                symbol = _get_current_binance_symbol_from_victoria(driver)
 
                 try:
                     binance_price = get_binance_price(symbol)

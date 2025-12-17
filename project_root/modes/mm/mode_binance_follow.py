@@ -25,13 +25,15 @@ from config import (
     MM_SELL_QTY_RATIO,
     MM_TOAST_WAIT_SEC,
 )
-from modes.driver_utils import init_driver
+from modes.utils_driver import init_driver
 from modes.mm.victoria_balance import get_free_usdt, get_free_coin_qty
 from modes.mm.victoria_trade import place_limit_order
 from modes.mm.victoria_orders import read_open_orders_side, cancel_order_row, OrderRow
-from modes.utils import wait_for_manual_login
-from modes.market_data import get_binance_last_from_ticker
+from modes.market_data import get_binance_price
+from modes.utils_logging import setup_logger
+from modes.utils_ui import validate_login_or_exit
 
+logger = setup_logger()
 
 Side = Literal["bid", "ask"]
 
@@ -121,11 +123,6 @@ def _victoria_trade_url(victoria_url: str, ticker: str) -> str:
 # Core engine
 # ---------------------------
 class FollowMMEngine:
-    """
-    모드3(매수) / 모드4(매도)
-    - 10분마다 Rebase: binance last 갱신 + (가격순 pruning) + 15개 채움
-    - 60초마다 Top-up: 가격 갱신 없이 15개 유지 (체결로 비었을 때만 바깥쪽 연장)
-    """
 
     def __init__(self, driver, side: Side, cfg: EngineConfig, ticker: str):
         self.driver = driver
@@ -141,7 +138,6 @@ class FollowMMEngine:
         self._rebase_lock = False
 
     def run_forever(self):
-        # 시작 즉시 1회
         self.rebase()
 
         while True:
@@ -157,54 +153,37 @@ class FollowMMEngine:
 
             time.sleep(0.5)
 
-    # ----------------
-    # Rebase
-    # ----------------
     def rebase(self):
         self._rebase_lock = True
         try:
-            # 1) 기준가 갱신
-            self._anchor_price = get_binance_last_from_ticker(self.ticker)
+            symbol = f"{self.ticker.upper()}USDT"
+            self._anchor_price = get_binance_price(symbol)
 
-            # 2) discount 새로 뽑기 (이 사이클 고정)
             self._discount_for_cycle = (
                 random.uniform(DISCOUNT_MIN, DISCOUNT_MAX) / 100.0
             )
 
-            # 3) 가격순 pruning: "15개만 남기고" 바깥쪽 취소
             self._prune_keep_15()
-
-            # 4) 부족분 채우기(15개)
             self._fill_to_15()
-
             self._last_rebase_ts = _now()
+
         finally:
             self._rebase_lock = False
 
-    # ----------------
-    # Topup
-    # ----------------
     def topup(self):
-        # 가격 갱신 없음
         if self._anchor_price is None or self._discount_for_cycle is None:
-            # 안전하게 rebase로 복구
             self.rebase()
             return
 
         self._fill_to_15()
         self._last_topup_ts = _now()
 
-    # ----------------
-    # Internal ops
-    # ----------------
     def _prune_keep_15(self):
         rows = read_open_orders_side(self.driver, self.side)
 
         if len(rows) <= self.cfg.levels:
             return
 
-        # 매도: 낮은 가격 15개 유지, 높은 것부터 취소
-        # 매수: 높은 가격 15개 유지, 낮은 것부터 취소
         if self.side == "ask":
             rows_sorted = sorted(rows, key=lambda r: r.price)  # low -> high
             cancel = rows_sorted[self.cfg.levels :]  # high side
@@ -302,6 +281,10 @@ class FollowMMEngine:
                 qty = _normalize_qty(budget / price)
                 if qty <= 0:
                     continue
+                logger.info(
+                    f"[ORDER] {self.ticker} {self.side.upper()} "
+                    f"price={price:.3f} qty={qty:.8f}"
+                )
                 place_limit_order(self.driver, "bid", price, qty)
                 _maybe_wait_toast(self.cfg)
                 _sleep_tiny()
@@ -312,6 +295,10 @@ class FollowMMEngine:
                 qty = _normalize_qty(coin * w)
                 if qty <= 0:
                     continue
+                logger.info(
+                    f"[ORDER] {self.ticker} {self.side.upper()} "
+                    f"price={price:.3f} qty={qty:.8f}"
+                )
                 place_limit_order(self.driver, "ask", price, qty)
                 _maybe_wait_toast(self.cfg)
                 _sleep_tiny()
@@ -324,14 +311,14 @@ def run_follow_mm_bid(victoria_url: str, ticker: str):
     try:
         driver.get(f"{victoria_url}/account/login")
 
-        wait_for_manual_login(3)
+        validate_login_or_exit(driver=driver, mode=3)
 
         driver.get(_victoria_trade_url(victoria_url, ticker))
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.ID, "user_base_trans"))
         )
 
-        FollowMMEngine(driver=driver, side="bid", cfg=cfg).run_forever()
+        FollowMMEngine(driver=driver, side="bid", cfg=cfg, ticker=ticker).run_forever()
 
     except KeyboardInterrupt:
         print("\n[INFO] Follow MM BID stopped by user (KeyboardInterrupt)")
@@ -354,14 +341,14 @@ def run_follow_mm_ask(victoria_url: str, ticker: str):
     try:
         driver.get(f"{victoria_url}/account/login")
 
-        wait_for_manual_login(4)
+        validate_login_or_exit(driver=driver, mode=4)
 
         driver.get(_victoria_trade_url(victoria_url, ticker))
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, "user_base_coin"))
         )
 
-        FollowMMEngine(driver=driver, side="ask", cfg=cfg).run_forever()
+        FollowMMEngine(driver=driver, side="ask", cfg=cfg, ticker=ticker).run_forever()
 
     except KeyboardInterrupt:
         print("\n[INFO] Follow MM ASK stopped by user (KeyboardInterrupt)")
@@ -377,6 +364,6 @@ def run_follow_mm_ask(victoria_url: str, ticker: str):
         print("[INFO] Driver shutdown complete.")
 
 
-# 500,000
-# 16,000,000
-# 11,000,000
+# 500
+# 16,000
+# 11,000

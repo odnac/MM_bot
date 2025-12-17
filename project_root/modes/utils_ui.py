@@ -1,6 +1,12 @@
 # utils.py
 import os
 import platform
+from modes.security import check_login_success
+
+
+def clear_console():
+    # os.system("cls" if platform.system() == "Windows" else "clear")
+    pass
 
 
 def wait_for_manual_login(mode: int):
@@ -21,6 +27,12 @@ def wait_for_manual_login(mode: int):
     print(f"\n[Mode {mode}] {title}\n\n")
 
 
-def clear_console():
-    # os.system("cls" if platform.system() == "Windows" else "clear")
-    pass
+def validate_login_or_exit(driver, mode: int) -> bool:
+    wait_for_manual_login(mode)
+
+    if not check_login_success(driver):
+        print("❌ Login failed. Please check your credentials.")
+        driver.quit()
+        return False
+
+    return True
