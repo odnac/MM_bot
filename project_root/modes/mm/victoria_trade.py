@@ -11,7 +11,6 @@ from selenium.webdriver.support import expected_conditions as EC
 def _set_input_value(driver, by, locator, value: str, timeout: int = 10):
     el = WebDriverWait(driver, timeout).until(EC.element_to_be_clickable((by, locator)))
     el.click()
-    # Ctrl+A / Delete 로 완전 삭제 후 입력 (사이트에 따라 clear()가 안 먹는 경우가 많음)
     el.send_keys(Keys.CONTROL, "a")
     el.send_keys(Keys.DELETE)
     el.send_keys(value)
@@ -21,16 +20,9 @@ def _set_input_value(driver, by, locator, value: str, timeout: int = 10):
 def place_limit_order(
     driver, side: str, price: float, qty: float, timeout: int = 10
 ) -> bool:
-    """
-    side: "bid" or "ask"
-    price: USDT 가격
-    qty: BTC 수량
-    """
-
     if qty <= 0 or price <= 0:
         return False
 
-    # 화면 표시가 89,764.000 같은 포맷이어도 input은 보통 숫자 문자열이면 됨
     price_str = f"{price:.6f}".rstrip("0").rstrip(".")
     qty_str = f"{qty:.8f}".rstrip("0").rstrip(".")
 

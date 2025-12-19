@@ -1,4 +1,4 @@
-# follow_mm_mode.py
+# mode_binance_follow.py
 from __future__ import annotations
 
 import random
@@ -26,14 +26,13 @@ from config import (
     MM_TOAST_WAIT_SEC,
 )
 from modes.utils_driver import init_driver
-from modes.mm.victoria_balance import get_free_usdt, get_free_coin_qty
+from modes.mm.victoria_balance import get_available_buy_usdt, get_available_sell_qty
 from modes.mm.victoria_trade import place_limit_order
 from modes.mm.victoria_orders import read_open_orders_side, cancel_order_row, OrderRow
 from modes.market_data import get_binance_price
 from modes.utils_logging import setup_logger
 from modes.utils_ui import validate_login_or_exit
 
-logger = setup_logger()
 
 Side = Literal["bid", "ask"]
 
@@ -49,6 +48,7 @@ class EngineConfig:
     buy_budget_ratio: float
     sell_qty_ratio: float
     toast_wait_sec: float
+    anchor_order_budget_ratio: float
 
 
 def _build_cfg() -> EngineConfig:
@@ -62,6 +62,7 @@ def _build_cfg() -> EngineConfig:
         buy_budget_ratio=MM_BUY_BUDGET_RATIO,
         sell_qty_ratio=MM_SELL_QTY_RATIO,
         toast_wait_sec=MM_TOAST_WAIT_SEC,
+        anchor_order_budget_ratio=0.1,
     )
 
 
@@ -70,34 +71,19 @@ def _now() -> float:
 
 
 def _step_ratio(step_percent: float) -> float:
-    # 0.2 -> 0.002
     return step_percent / 100.0
 
 
 def _normalize_price(price: float) -> float:
-    """
-    tick size를 정확히 모르면 일단 소수 3자리로 맞추는 게 UI에 잘 맞는 경우가 많음.
-    (너 스샷이 89,764.000 형태)
-    """
     return round(float(price), 3)
 
 
 def _normalize_qty(qty: float) -> float:
-    """
-    BTC 수량은 보통 8자리면 충분.
-    """
     return round(float(qty), 8)
 
 
 def _weights_pyramid(n: int) -> List[float]:
-    # 1..n (합 1)
     raw = list(range(1, n + 1))
-    s = sum(raw)
-    return [r / s for r in raw]
-
-
-def _weights_inverse_pyramid(n: int) -> List[float]:
-    raw = list(range(n, 0, -1))
     s = sum(raw)
     return [r / s for r in raw]
 
@@ -107,10 +93,6 @@ def _sleep_tiny():
 
 
 def _maybe_wait_toast(cfg: EngineConfig):
-    """
-    TODO: 나중에 토스트 CSS 주면 여기서 '토스트 나타남->사라짐' 대기 로직을 붙이면 됨.
-    지금은 옵션으로만 두고 기본 0초.
-    """
     if cfg.toast_wait_sec and cfg.toast_wait_sec > 0:
         time.sleep(cfg.toast_wait_sec)
 
@@ -119,12 +101,9 @@ def _victoria_trade_url(victoria_url: str, ticker: str) -> str:
     return f"{victoria_url}/trade?code=USDT-{ticker.upper()}"
 
 
-# ---------------------------
-# Core engine
-# ---------------------------
 class FollowMMEngine:
-
     def __init__(self, driver, side: Side, cfg: EngineConfig, ticker: str):
+        self.logger = setup_logger(side)
         self.driver = driver
         self.side = side
         self.cfg = cfg
@@ -132,98 +111,235 @@ class FollowMMEngine:
 
         self._step = _step_ratio(cfg.step_percent)
         self._anchor_price: Optional[float] = None
-        self._discount_for_cycle: Optional[float] = None  # ratio (0.01 = 1%)
+        self._prev_anchor_price: Optional[float] = None
+        self._discount_for_cycle: Optional[float] = None
         self._last_rebase_ts = 0.0
         self._last_topup_ts = 0.0
         self._rebase_lock = False
 
     def run_forever(self):
-        self.rebase()
+        self.full_rebalance()
 
         while True:
             now = _now()
 
             if now - self._last_rebase_ts >= self.cfg.rebase_interval_sec:
-                self.rebase()
+                self._sync_with_binance()
 
             if (not self._rebase_lock) and (
                 now - self._last_topup_ts >= self.cfg.topup_interval_sec
             ):
-                self.topup()
+                self._topup_missing_orders()
 
             time.sleep(0.5)
 
-    def rebase(self):
+    def full_rebalance(self):
         self._rebase_lock = True
         try:
             symbol = f"{self.ticker.upper()}USDT"
             self._anchor_price = get_binance_price(symbol)
+            self._prev_anchor_price = self._anchor_price
 
             self._discount_for_cycle = (
                 random.uniform(DISCOUNT_MIN, DISCOUNT_MAX) / 100.0
             )
 
-            self._prune_keep_15()
-            self._fill_to_15()
+            self.logger.info(
+                f"[FULL REBALANCE] {self.ticker} Binance={self._anchor_price:.3f} "
+                f"Discount={self._discount_for_cycle*100:.2f}%"
+            )
+
+            self._place_anchor_order()
+            self._fill_ladder_to_target()
+
             self._last_rebase_ts = _now()
 
         finally:
             self._rebase_lock = False
 
-    def topup(self):
-        if self._anchor_price is None or self._discount_for_cycle is None:
-            self.rebase()
+    def _sync_with_binance(self):
+        symbol = f"{self.ticker.upper()}USDT"
+
+        try:
+            new_price = get_binance_price(symbol)
+        except Exception as e:
+            self.logger.error(f"Failed to fetch Binance price: {e}")
             return
 
-        self._fill_to_15()
+        if self._prev_anchor_price is None:
+            self.full_rebalance()
+            return
+
+        price_change = new_price - self._prev_anchor_price
+        price_change_percent = (price_change / self._prev_anchor_price) * 100
+
+        try:
+            rows = read_open_orders_side(self.driver, self.side)
+            orderbook_empty = len(rows) == 0
+        except Exception as e:
+            self.logger.error(f"Failed to read orderbook: {e}")
+            return
+
+        if self.side == "bid":
+            if price_change > 0:
+                self.logger.info(
+                    f"[PRICE UP] {self.ticker} "
+                    f"{self._prev_anchor_price:.3f} → {new_price:.3f} "
+                    f"(+{price_change:.3f}, +{price_change_percent:.2f}%) → REBALANCE (pull market up)"
+                )
+                self.full_rebalance()
+            elif orderbook_empty or price_change < 0:
+                reason = "EMPTY ORDERBOOK" if orderbook_empty else "PRICE DOWN"
+                self.logger.info(
+                    f"[{reason}] {self.ticker} "
+                    f"{self._prev_anchor_price:.3f} → {new_price:.3f} "
+                    f"({price_change:.3f}, {price_change_percent:.2f}%) → FILL ONLY (ASK bot adjusting)"
+                )
+                self._fill_orderbook_only(new_price)
+
+        else:
+            if price_change < 0:
+                self.logger.info(
+                    f"[PRICE DOWN] {self.ticker} "
+                    f"{self._prev_anchor_price:.3f} → {new_price:.3f} "
+                    f"({price_change:.3f}, {price_change_percent:.2f}%) → REBALANCE (pull market down)"
+                )
+                self.full_rebalance()
+            elif orderbook_empty or price_change > 0:
+                reason = "EMPTY ORDERBOOK" if orderbook_empty else "PRICE UP"
+                self.logger.info(
+                    f"[{reason}] {self.ticker} "
+                    f"{self._prev_anchor_price:.3f} → {new_price:.3f} "
+                    f"(+{price_change:.3f}, +{price_change_percent:.2f}%) → FILL ONLY (BID bot adjusting)"
+                )
+                self._fill_orderbook_only(new_price)
+
+    def _fill_orderbook_only(self, binance_price: float):
+        self._anchor_price = binance_price
+        self._prev_anchor_price = binance_price
+
+        if self._discount_for_cycle is None:
+            self._discount_for_cycle = (
+                random.uniform(DISCOUNT_MIN, DISCOUNT_MAX) / 100.0
+            )
+
+        self.logger.info(
+            f"[FILL ORDERS ONLY] {self.ticker} Binance={self._anchor_price:.3f} "
+            f"Discount={self._discount_for_cycle*100:.2f}%"
+        )
+
+        prices = self._build_ladder_prices()
+        self._place_ladder_orders(prices)
+
+        self._last_rebase_ts = _now()
+
+    def _topup_missing_orders(self):
+        if self._anchor_price is None or self._discount_for_cycle is None:
+            self.full_rebalance()
+            return
+
+        self.logger.info(f"[TOPUP] {self.ticker} Filling missing orders")
+        self._fill_ladder_to_target()
         self._last_topup_ts = _now()
 
-    def _prune_keep_15(self):
-        rows = read_open_orders_side(self.driver, self.side)
-
-        if len(rows) <= self.cfg.levels:
+    def _place_anchor_order(self):
+        if self._anchor_price is None or self._discount_for_cycle is None:
             return
 
-        if self.side == "ask":
-            rows_sorted = sorted(rows, key=lambda r: r.price)  # low -> high
-            cancel = rows_sorted[self.cfg.levels :]  # high side
-            cancel = sorted(cancel, key=lambda r: r.price, reverse=True)
-        else:
-            rows_sorted = sorted(
-                rows, key=lambda r: r.price, reverse=True
-            )  # high -> low
-            cancel = rows_sorted[self.cfg.levels :]  # low side
-            cancel = sorted(cancel, key=lambda r: r.price)
+        max_retries = 3
+        retry_count = 0
 
-        ops = 0
-        for row in cancel:
-            if ops >= self.cfg.max_cancel_ops_per_cycle:
-                break
+        if self.side == "bid":
+            anchor_price = _normalize_price(
+                self._anchor_price * (1 - self._discount_for_cycle)
+            )
+
             try:
-                cancel_order_row(
-                    self.driver, row, timeout=self.cfg.cancel_row_timeout_sec
+                usdt = (
+                    get_available_buy_usdt(self.driver)
+                    * self.cfg.buy_budget_ratio
+                    * self.cfg.anchor_order_budget_ratio
                 )
-                _maybe_wait_toast(self.cfg)  # TODO: 토스트 CSS 적용 시 의미 생김
-                ops += 1
-            except (StaleElementReferenceException, WebDriverException):
-                # UI가 흔들리면 다음 사이클에서 다시 맞춰짐
-                continue
+                qty = _normalize_qty(usdt / anchor_price)
 
-    def _fill_to_15(self):
+                if qty > 0:
+                    self.logger.info(
+                        f"[ANCHOR ORDER] {self.ticker} BID "
+                        f"price={anchor_price:.3f} qty={qty:.8f} "
+                        f"(Binance: {self._anchor_price:.3f}, discount: {self._discount_for_cycle*100:.2f}%)"
+                    )
+
+                    while retry_count < max_retries:
+                        try:
+                            place_limit_order(self.driver, "bid", anchor_price, qty)
+                            _maybe_wait_toast(self.cfg)
+                            _sleep_tiny()
+                            break
+                        except Exception as e:
+                            retry_count += 1
+                            self.logger.warning(
+                                f"Anchor order failed (attempt {retry_count}/{max_retries}): {e}"
+                            )
+                            if retry_count >= max_retries:
+                                self.logger.error(
+                                    "Anchor order failed after max retries"
+                                )
+                            else:
+                                time.sleep(1)
+            except Exception as e:
+                self.logger.error(f"Failed to get balance for anchor order: {e}")
+
+        else:
+            anchor_price = _normalize_price(
+                self._anchor_price * (1 + self._discount_for_cycle)
+            )
+
+            try:
+                coin = (
+                    get_available_sell_qty(self.driver)
+                    * self.cfg.sell_qty_ratio
+                    * self.cfg.anchor_order_budget_ratio
+                )
+                qty = _normalize_qty(coin)
+
+                if qty > 0:
+                    self.logger.info(
+                        f"[ANCHOR ORDER] {self.ticker} ASK "
+                        f"price={anchor_price:.3f} qty={qty:.8f} "
+                        f"(Binance: {self._anchor_price:.3f}, premium: {self._discount_for_cycle*100:.2f}%)"
+                    )
+
+                    while retry_count < max_retries:
+                        try:
+                            place_limit_order(self.driver, "ask", anchor_price, qty)
+                            _maybe_wait_toast(self.cfg)
+                            _sleep_tiny()
+                            break
+                        except Exception as e:
+                            retry_count += 1
+                            self.logger.warning(
+                                f"Anchor order failed (attempt {retry_count}/{max_retries}): {e}"
+                            )
+                            if retry_count >= max_retries:
+                                self.logger.error(
+                                    "Anchor order failed after max retries"
+                                )
+                            else:
+                                time.sleep(1)
+            except Exception as e:
+                self.logger.error(f"Failed to get balance for anchor order: {e}")
+
+    def _fill_ladder_to_target(self):
         rows = read_open_orders_side(self.driver, self.side)
         need = self.cfg.levels - len(rows)
         if need <= 0:
             return
 
-        # 완전 비어있으면 anchor 기반으로 full ladder 생성
         if len(rows) == 0:
-            prices = self._build_full_ladder_prices()
-            self._place_ladder(prices)
+            prices = self._build_ladder_prices()
+            self._place_ladder_orders(prices)
             return
 
-        # “앞쪽이 먹히면 당겨지고 바깥쪽이 채워짐” 구현:
-        # - ask: 남아있는 것 중 최고가(max) 기준으로 (1+step)^k로 바깥쪽(더 높은) 생성
-        # - bid: 남아있는 것 중 최저가(min) 기준으로 (1-step)^k로 바깥쪽(더 낮은) 생성
         if self.side == "ask":
             outer = max(r.price for r in rows)
             new_prices = [
@@ -237,71 +353,121 @@ class FollowMMEngine:
                 for i in range(1, need + 1)
             ]
 
-        self._place_ladder(new_prices)
+        self._place_ladder_orders(new_prices)
 
-    def _build_full_ladder_prices(self) -> List[float]:
-        assert self._anchor_price is not None
-        assert self._discount_for_cycle is not None
-
-        p1 = _normalize_price(self._anchor_price)
-        d = self._discount_for_cycle
-        s = self._step
-
-        prices: List[float] = [p1]
-
-        if self.side == "bid":
-            # 2..15 : anchor*(1-d) * (1-s)^(k-2)
-            base = p1 * (1 - d)
-            for k in range(2, self.cfg.levels + 1):
-                pk = base * ((1 - s) ** (k - 2))
-                prices.append(_normalize_price(pk))
-        else:
-            # 매도는 "바이낸스보다 비싸게" 가는 안전형으로 설정
-            # (만약 싸게 던지는 전략이면 (1 - d)로 바꾸면 됨)
-            base = p1 * (1 + d)
-            for k in range(2, self.cfg.levels + 1):
-                pk = base * ((1 + s) ** (k - 2))
-                prices.append(_normalize_price(pk))
-
-        return prices
-
-    def _place_ladder(self, prices: List[float]):
-        """
-        - bid(매수): 피라미드(가까울수록 적게, 멀수록 많게) / 기준: USDT
-        - ask(매도): 역피라미드(가까울수록 많게, 멀수록 적게) / 기준: 코인수량
-        """
+    def _place_ladder_orders(self, prices: List[float]):
         if not prices:
             return
 
         if self.side == "bid":
-            usdt = get_free_usdt(self.driver) * self.cfg.buy_budget_ratio
+            try:
+                usdt = (
+                    get_available_buy_usdt(self.driver)
+                    * self.cfg.buy_budget_ratio
+                    * (1 - self.cfg.anchor_order_budget_ratio)
+                )
+            except Exception as e:
+                self.logger.error(f"Failed to get USDT balance: {e}")
+                return
+
             weights = _weights_pyramid(len(prices))
+
             for price, w in zip(prices, weights):
                 budget = usdt * w
                 qty = _normalize_qty(budget / price)
                 if qty <= 0:
                     continue
-                logger.info(
-                    f"[ORDER] {self.ticker} {self.side.upper()} "
+                self.logger.info(
+                    f"[LADDER] {self.ticker} {self.side.upper()} "
                     f"price={price:.3f} qty={qty:.8f}"
                 )
-                place_limit_order(self.driver, "bid", price, qty)
-                _maybe_wait_toast(self.cfg)
-                _sleep_tiny()
+                try:
+                    place_limit_order(self.driver, "bid", price, qty)
+                    _maybe_wait_toast(self.cfg)
+                    _sleep_tiny()
+                except Exception as e:
+                    self.logger.warning(f"Failed to place ladder order at {price}: {e}")
+                    continue
+
         else:
-            coin = get_free_coin_qty(self.driver) * self.cfg.sell_qty_ratio
-            weights = _weights_inverse_pyramid(len(prices))
+            try:
+                coin = (
+                    get_available_sell_qty(self.driver)
+                    * self.cfg.sell_qty_ratio
+                    * (1 - self.cfg.anchor_order_budget_ratio)
+                )
+            except Exception as e:
+                self.logger.error(f"Failed to get coin balance: {e}")
+                return
+
+            weights = _weights_pyramid(len(prices))
+
             for price, w in zip(prices, weights):
                 qty = _normalize_qty(coin * w)
                 if qty <= 0:
                     continue
-                logger.info(
-                    f"[ORDER] {self.ticker} {self.side.upper()} "
+                self.logger.info(
+                    f"[LADDER] {self.ticker} {self.side.upper()} "
                     f"price={price:.3f} qty={qty:.8f}"
                 )
-                place_limit_order(self.driver, "ask", price, qty)
+                try:
+                    place_limit_order(self.driver, "ask", price, qty)
+                    _maybe_wait_toast(self.cfg)
+                    _sleep_tiny()
+                except Exception as e:
+                    self.logger.warning(f"Failed to place ladder order at {price}: {e}")
+                    continue
+
+    def _remove_excess_orders(self):
+        rows = read_open_orders_side(self.driver, self.side)
+
+        if len(rows) <= self.cfg.levels:
+            return
+
+        if self.side == "ask":
+            rows_sorted = sorted(rows, key=lambda r: r.price)
+            cancel = rows_sorted[self.cfg.levels :]
+            cancel = sorted(cancel, key=lambda r: r.price, reverse=True)
+        else:
+            rows_sorted = sorted(rows, key=lambda r: r.price, reverse=True)
+            cancel = rows_sorted[self.cfg.levels :]
+            cancel = sorted(cancel, key=lambda r: r.price)
+
+        ops = 0
+        for row in cancel:
+            if ops >= self.cfg.max_cancel_ops_per_cycle:
+                break
+            try:
+                cancel_order_row(
+                    self.driver, row, timeout=self.cfg.cancel_row_timeout_sec
+                )
                 _maybe_wait_toast(self.cfg)
-                _sleep_tiny()
+                ops += 1
+            except (StaleElementReferenceException, WebDriverException):
+                continue
+
+    def _build_ladder_prices(self) -> List[float]:
+        assert self._anchor_price is not None
+        assert self._discount_for_cycle is not None
+
+        p_anchor = self._anchor_price
+        d = self._discount_for_cycle
+        s = self._step
+
+        prices: List[float] = []
+
+        if self.side == "bid":
+            base = p_anchor * (1 - d)
+            for k in range(1, self.cfg.levels + 1):
+                pk = base * ((1 - s) ** k)
+                prices.append(_normalize_price(pk))
+        else:
+            base = p_anchor * (1 + d)
+            for k in range(1, self.cfg.levels + 1):
+                pk = base * ((1 + s) ** k)
+                prices.append(_normalize_price(pk))
+
+        return prices
 
 
 def run_follow_mm_bid(victoria_url: str, ticker: str):
@@ -310,27 +476,25 @@ def run_follow_mm_bid(victoria_url: str, ticker: str):
 
     try:
         driver.get(f"{victoria_url}/account/login")
-
         validate_login_or_exit(driver=driver, mode=3)
-
         driver.get(_victoria_trade_url(victoria_url, ticker))
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.ID, "user_base_trans"))
         )
-
         FollowMMEngine(driver=driver, side="bid", cfg=cfg, ticker=ticker).run_forever()
 
     except KeyboardInterrupt:
         print("\n[INFO] Follow MM BID stopped by user (KeyboardInterrupt)")
-
     except Exception as e:
         print(f"\n[ERROR] Follow MM BID crashed: {type(e).__name__} - {e}")
+        import traceback
 
+        traceback.print_exc()
     finally:
         try:
             driver.quit()
-        except Exception:
-            pass
+        except (WebDriverException, Exception) as e:
+            print(f"[WARNING] Error during driver cleanup: {e}")
         print("[INFO] Driver shutdown complete.")
 
 
@@ -340,30 +504,23 @@ def run_follow_mm_ask(victoria_url: str, ticker: str):
 
     try:
         driver.get(f"{victoria_url}/account/login")
-
         validate_login_or_exit(driver=driver, mode=4)
-
         driver.get(_victoria_trade_url(victoria_url, ticker))
         WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "user_base_coin"))
+            EC.presence_of_element_located((By.ID, "user_base_coin"))
         )
-
         FollowMMEngine(driver=driver, side="ask", cfg=cfg, ticker=ticker).run_forever()
 
     except KeyboardInterrupt:
         print("\n[INFO] Follow MM ASK stopped by user (KeyboardInterrupt)")
-
     except Exception as e:
         print(f"\n[ERROR] Follow MM ASK crashed: {type(e).__name__} - {e}")
+        import traceback
 
+        traceback.print_exc()
     finally:
         try:
             driver.quit()
-        except Exception:
-            pass
+        except (WebDriverException, Exception) as e:
+            print(f"[WARNING] Error during driver cleanup: {e}")
         print("[INFO] Driver shutdown complete.")
-
-
-# 500
-# 16,000
-# 11,000

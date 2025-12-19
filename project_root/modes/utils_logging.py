@@ -6,27 +6,29 @@ import os
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
-LOG_FILE = os.path.join(LOG_DIR, "mm_engine.log")
 
-
-def setup_logger():
-    logger = logging.getLogger("mm")
+def setup_logger(side: str):
+    logger_name = f"mm_{side}"
+    logger = logging.getLogger(logger_name)
     logger.setLevel(logging.INFO)
 
     if logger.handlers:
         return logger
 
     formatter = logging.Formatter(
-        "[%(asctime)s] [%(levelname)s] %(message)s",
+        "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
     console = logging.StreamHandler()
     console.setFormatter(formatter)
 
-    # 파일 출력 (5MB 넘으면 자동 롤링)
+    log_file = os.path.join(LOG_DIR, f"mm_engine_{side}.log")
     file = RotatingFileHandler(
-        LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5, encoding="utf-8"
+        log_file,
+        maxBytes=5 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
     )
     file.setFormatter(formatter)
 
