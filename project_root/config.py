@@ -25,8 +25,8 @@ def get_env_int(key: str) -> int:
 
 ORDERBOOK_REFRESH_INTERVAL = get_env_float("ORDERBOOK_REFRESH_INTERVAL")
 
-DISCOUNT_MIN = get_env_float("DISCOUNT_MIN")
-DISCOUNT_MAX = get_env_float("DISCOUNT_MAX")
+ADJUSTMENT_MIN = get_env_float("ADJUSTMENT_MIN")
+ADJUSTMENT_MAX = get_env_float("ADJUSTMENT_MAX")
 FOLLOW_UPDATE_SEC = get_env_int("FOLLOW_UPDATE_SEC")
 
 MM_LEVELS = get_env_int("MM_LEVELS")

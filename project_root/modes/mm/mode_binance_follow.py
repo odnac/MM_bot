@@ -13,8 +13,8 @@ from selenium.common.exceptions import (
     WebDriverException,
 )
 from config import (
-    DISCOUNT_MIN,
-    DISCOUNT_MAX,
+    ADJUSTMENT_MIN,
+    ADJUSTMENT_MAX,
     MM_LEVELS,
     MM_REBASE_INTERVAL_SEC,
     MM_TOPUP_INTERVAL_SEC,
@@ -112,7 +112,7 @@ class FollowMMEngine:
         self._step = _step_ratio(cfg.step_percent)
         self._anchor_price: Optional[float] = None
         self._prev_anchor_price: Optional[float] = None
-        self._discount_for_cycle: Optional[float] = None
+        self._price_adjustment: Optional[float] = None
         self._last_rebase_ts = 0.0
         self._last_topup_ts = 0.0
         self._rebase_lock = False
@@ -138,21 +138,22 @@ class FollowMMEngine:
         try:
             symbol = f"{self.ticker.upper()}USDT"
             self._anchor_price = get_binance_price(symbol)
-            self._prev_anchor_price = self._anchor_price
 
-            self._discount_for_cycle = (
-                random.uniform(DISCOUNT_MIN, DISCOUNT_MAX) / 100.0
+            self._price_adjustment = (
+                random.uniform(ADJUSTMENT_MIN, ADJUSTMENT_MAX) / 100.0
             )
 
             self.logger.info(
-                f"[FULL REBALANCE] {self.ticker} Binance={self._anchor_price:.3f} "
-                f"Discount={self._discount_for_cycle*100:.2f}%"
+                f"{self.ticker} [FULL REBALANCE] Binance={self._anchor_price:.3f} "
+                f"Adjustment={self._price_adjustment*100:.2f}%"
             )
 
             self._place_anchor_order()
             self._fill_ladder_to_target()
 
             self._last_rebase_ts = _now()
+
+            self._prev_anchor_price = self._anchor_price
 
         finally:
             self._rebase_lock = False
@@ -183,7 +184,7 @@ class FollowMMEngine:
         if self.side == "bid":
             if price_change > 0:
                 self.logger.info(
-                    f"[PRICE UP] {self.ticker} "
+                    f"{self.ticker} [PRICE UP]  "
                     f"{self._prev_anchor_price:.3f} → {new_price:.3f} "
                     f"(+{price_change:.3f}, +{price_change_percent:.2f}%) → REBALANCE (pull market up)"
                 )
@@ -191,7 +192,7 @@ class FollowMMEngine:
             elif orderbook_empty or price_change < 0:
                 reason = "EMPTY ORDERBOOK" if orderbook_empty else "PRICE DOWN"
                 self.logger.info(
-                    f"[{reason}] {self.ticker} "
+                    f"{self.ticker} [{reason}] "
                     f"{self._prev_anchor_price:.3f} → {new_price:.3f} "
                     f"({price_change:.3f}, {price_change_percent:.2f}%) → FILL ONLY (ASK bot adjusting)"
                 )
@@ -200,7 +201,7 @@ class FollowMMEngine:
         else:
             if price_change < 0:
                 self.logger.info(
-                    f"[PRICE DOWN] {self.ticker} "
+                    f"{self.ticker} [PRICE DOWN] "
                     f"{self._prev_anchor_price:.3f} → {new_price:.3f} "
                     f"({price_change:.3f}, {price_change_percent:.2f}%) → REBALANCE (pull market down)"
                 )
@@ -208,7 +209,7 @@ class FollowMMEngine:
             elif orderbook_empty or price_change > 0:
                 reason = "EMPTY ORDERBOOK" if orderbook_empty else "PRICE UP"
                 self.logger.info(
-                    f"[{reason}] {self.ticker} "
+                    f"{self.ticker} [{reason}] "
                     f"{self._prev_anchor_price:.3f} → {new_price:.3f} "
                     f"(+{price_change:.3f}, +{price_change_percent:.2f}%) → FILL ONLY (BID bot adjusting)"
                 )
@@ -218,14 +219,14 @@ class FollowMMEngine:
         self._anchor_price = binance_price
         self._prev_anchor_price = binance_price
 
-        if self._discount_for_cycle is None:
-            self._discount_for_cycle = (
-                random.uniform(DISCOUNT_MIN, DISCOUNT_MAX) / 100.0
+        if self._price_adjustment is None:
+            self._price_adjustment = (
+                random.uniform(ADJUSTMENT_MIN, ADJUSTMENT_MAX) / 100.0
             )
 
         self.logger.info(
-            f"[FILL ORDERS ONLY] {self.ticker} Binance={self._anchor_price:.3f} "
-            f"Discount={self._discount_for_cycle*100:.2f}%"
+            f"{self.ticker} [FILL ORDERS ONLY] Binance={self._anchor_price:.3f} "
+            f"Adjustment={self._price_adjustment*100:.2f}%"
         )
 
         prices = self._build_ladder_prices()
@@ -234,16 +235,16 @@ class FollowMMEngine:
         self._last_rebase_ts = _now()
 
     def _topup_missing_orders(self):
-        if self._anchor_price is None or self._discount_for_cycle is None:
+        if self._anchor_price is None or self._price_adjustment is None:
             self.full_rebalance()
             return
 
-        self.logger.info(f"[TOPUP] {self.ticker} Filling missing orders")
+        self.logger.info(f"{self.ticker} [TOPUP] Filling missing orders")
         self._fill_ladder_to_target()
         self._last_topup_ts = _now()
 
     def _place_anchor_order(self):
-        if self._anchor_price is None or self._discount_for_cycle is None:
+        if self._anchor_price is None or self._price_adjustment is None:
             return
 
         max_retries = 3
@@ -251,7 +252,7 @@ class FollowMMEngine:
 
         if self.side == "bid":
             anchor_price = _normalize_price(
-                self._anchor_price * (1 - self._discount_for_cycle)
+                self._anchor_price * (1 - self._price_adjustment)
             )
 
             try:
@@ -264,9 +265,9 @@ class FollowMMEngine:
 
                 if qty > 0:
                     self.logger.info(
-                        f"[ANCHOR ORDER] {self.ticker} BID "
+                        f"{self.ticker} [ANCHOR ORDER] BID "
                         f"price={anchor_price:.3f} qty={qty:.8f} "
-                        f"(Binance: {self._anchor_price:.3f}, discount: {self._discount_for_cycle*100:.2f}%)"
+                        f"(Binance: {self._anchor_price:.3f}, Adjustment: {self._price_adjustment*100:.2f}%)"
                     )
 
                     while retry_count < max_retries:
@@ -291,7 +292,7 @@ class FollowMMEngine:
 
         else:
             anchor_price = _normalize_price(
-                self._anchor_price * (1 + self._discount_for_cycle)
+                self._anchor_price * (1 + self._price_adjustment)
             )
 
             try:
@@ -304,9 +305,9 @@ class FollowMMEngine:
 
                 if qty > 0:
                     self.logger.info(
-                        f"[ANCHOR ORDER] {self.ticker} ASK "
+                        f"{self.ticker} [ANCHOR ORDER] ASK "
                         f"price={anchor_price:.3f} qty={qty:.8f} "
-                        f"(Binance: {self._anchor_price:.3f}, premium: {self._discount_for_cycle*100:.2f}%)"
+                        f"(Binance: {self._anchor_price:.3f}, premium: {self._price_adjustment*100:.2f}%)"
                     )
 
                     while retry_count < max_retries:
@@ -333,6 +334,7 @@ class FollowMMEngine:
         rows = read_open_orders_side(self.driver, self.side)
         need = self.cfg.levels - len(rows)
         if need <= 0:
+            # _remove_excess_orders()
             return
 
         if len(rows) == 0:
@@ -378,7 +380,7 @@ class FollowMMEngine:
                 if qty <= 0:
                     continue
                 self.logger.info(
-                    f"[LADDER] {self.ticker} {self.side.upper()} "
+                    f"{self.ticker} [LADDER] {self.side.upper()} "
                     f"price={price:.3f} qty={qty:.8f}"
                 )
                 try:
@@ -407,7 +409,7 @@ class FollowMMEngine:
                 if qty <= 0:
                     continue
                 self.logger.info(
-                    f"[LADDER] {self.ticker} {self.side.upper()} "
+                    f"{self.ticker} [LADDER] {self.side.upper()} "
                     f"price={price:.3f} qty={qty:.8f}"
                 )
                 try:
@@ -448,10 +450,10 @@ class FollowMMEngine:
 
     def _build_ladder_prices(self) -> List[float]:
         assert self._anchor_price is not None
-        assert self._discount_for_cycle is not None
+        assert self._price_adjustment is not None
 
         p_anchor = self._anchor_price
-        d = self._discount_for_cycle
+        d = self._price_adjustment
         s = self._step
 
         prices: List[float] = []

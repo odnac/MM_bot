@@ -1,6 +1,5 @@
 # referenced_mm_mode.py
 import time
-import random
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -8,7 +7,7 @@ from modes.utils_driver import init_driver
 from modes.utils_ui import clear_console
 from modes.utils_ui import validate_login_or_exit
 from modes.market_data import get_binance_price
-from config import DISCOUNT_MIN, DISCOUNT_MAX, FOLLOW_UPDATE_SEC
+from config import ADJUSTMENT_MIN, ADJUSTMENT_MAX, FOLLOW_UPDATE_SEC
 
 
 def _get_current_binance_symbol_from_victoria(driver) -> str:
@@ -41,13 +40,13 @@ def print_binance_referenced_price_mode(VICTORIA_URL: str):
                     time.sleep(1)
                     continue
 
-                discount = random.uniform(DISCOUNT_MIN, DISCOUNT_MAX)
-                target_price = binance_price * (1 - discount)
+                # adjustment = random.uniform(ADJUSTMENT_MIN, ADJUSTMENT_MAX)
+                # target_price = binance_price * (1 - adjustment)
 
                 clear_console()
                 print(
-                    f"[{time.strftime('%H:%M:%S')}] Binance {symbol}={binance_price:.2f} | "
-                    f"target(-{discount*100:.3f}%)={target_price:.2f}"
+                    f"[{time.strftime('%H:%M:%S')}] Binance {symbol}={binance_price:.2f}"
+                    # f"target(-{adjustment*100:.3f}%)={target_price:.2f}"
                 )
 
                 time.sleep(FOLLOW_UPDATE_SEC)

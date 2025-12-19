@@ -9,3 +9,10 @@ venv/
 
 Thumbs.db
 Desktop.ini
+
+
+logs/
+*.log
+
+TODO/
+*.txt

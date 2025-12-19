@@ -1,6 +1,4 @@
 # utils.py
-import os
-import platform
 from modes.security import check_login_success
 
 

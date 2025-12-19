@@ -1,38 +1,42 @@
 # utils_logging.py
-import logging
-from logging.handlers import RotatingFileHandler
 import os
+import logging
+from logging.handlers import TimedRotatingFileHandler
+from datetime import datetime
 
-LOG_DIR = "logs"
-os.makedirs(LOG_DIR, exist_ok=True)
 
-
-def setup_logger(side: str):
-    logger_name = f"mm_{side}"
-    logger = logging.getLogger(logger_name)
-    logger.setLevel(logging.INFO)
+def setup_logger(side: str) -> logging.Logger:
+    logger = logging.getLogger(f"FollowMM_{side.upper()}")
 
     if logger.handlers:
         return logger
 
-    formatter = logging.Formatter(
-        "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+    logger.setLevel(logging.INFO)
+
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+
+    log_file = os.path.join(
+        log_dir, f"{side}_{datetime.now().strftime('%Y-%m-%d')}.log"
     )
 
-    console = logging.StreamHandler()
-    console.setFormatter(formatter)
-
-    log_file = os.path.join(LOG_DIR, f"mm_engine_{side}.log")
-    file = RotatingFileHandler(
-        log_file,
-        maxBytes=5 * 1024 * 1024,
-        backupCount=5,
+    handler = TimedRotatingFileHandler(
+        filename=log_file,
+        when="midnight",
+        interval=1,
+        backupCount=0,
         encoding="utf-8",
     )
-    file.setFormatter(formatter)
 
-    logger.addHandler(console)
-    logger.addHandler(file)
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    handler.setFormatter(formatter)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+
+    logger.addHandler(handler)
+    logger.addHandler(console_handler)
 
     return logger
