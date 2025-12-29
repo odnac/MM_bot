@@ -99,7 +99,6 @@ def _normalize_qty(qty: float) -> float:
 
 
 def _parse_number(text: str) -> float:
-    """텍스트에서 숫자 파싱 (쉼표 제거)"""
     t = (text or "").strip()
     t = re.sub(r"[^0-9\-,.]", "", t).replace(",", "")
     if not t:
@@ -126,61 +125,26 @@ def _victoria_trade_url(victoria_url: str, ticker: str) -> str:
     return f"{victoria_url}/trade?code=USDT-{ticker.upper()}"
 
 
-def read_orderbook_asks(driver, timeout: int = 5) -> List[OrderbookLevel]:
-    """매도 호가창 전체 읽기 (높은 가격부터 낮은 가격 순서)"""
+def read_orderbook(driver, side: Side, timeout: int = 5) -> List[OrderbookLevel]:
+    container_id = "order-box-ask" if side == "ask" else "order-box-bid"
     try:
         container = WebDriverWait(driver, timeout).until(
-            EC.presence_of_element_located((By.ID, "order-box-ask"))
+            EC.presence_of_element_located((By.ID, container_id))
         )
         rows = container.find_elements(By.CSS_SELECTOR, "a.bidding-table-rows")
 
         levels = []
         for row in rows:
             try:
-                price_el = row.find_element(
-                    By.CSS_SELECTOR, "div.bidding-table-column.col-price"
+                price_text = row.find_element(By.CSS_SELECTOR, "div.col-price").text
+                qty_text = row.find_element(By.CSS_SELECTOR, "div.col-cost").text
+                levels.append(
+                    OrderbookLevel(
+                        price=_parse_number(price_text), qty=_parse_number(qty_text)
+                    )
                 )
-                qty_el = row.find_element(
-                    By.CSS_SELECTOR, "div.bidding-table-column.col-cost"
-                )
-
-                price = _parse_number(price_el.text)
-                qty = _parse_number(qty_el.text)
-
-                levels.append(OrderbookLevel(price=price, qty=qty))
             except Exception:
                 continue
-
-        return levels
-    except Exception:
-        return []
-
-
-def read_orderbook_bids(driver, timeout: int = 5) -> List[OrderbookLevel]:
-    """매수 호가창 전체 읽기 (높은 가격부터 낮은 가격 순서)"""
-    try:
-        container = WebDriverWait(driver, timeout).until(
-            EC.presence_of_element_located((By.ID, "order-box-bid"))
-        )
-        rows = container.find_elements(By.CSS_SELECTOR, "a.bidding-table-rows")
-
-        levels = []
-        for row in rows:
-            try:
-                price_el = row.find_element(
-                    By.CSS_SELECTOR, "div.bidding-table-column.col-price"
-                )
-                qty_el = row.find_element(
-                    By.CSS_SELECTOR, "div.bidding-table-column.col-cost"
-                )
-
-                price = _parse_number(price_el.text)
-                qty = _parse_number(qty_el.text)
-
-                levels.append(OrderbookLevel(price=price, qty=qty))
-            except Exception:
-                continue
-
         return levels
     except Exception:
         return []
@@ -193,7 +157,6 @@ class FollowMMEngine:
         self.side = side
         self.cfg = cfg
         self.ticker = ticker.upper()
-
         self._step = _step_ratio(cfg.step_percent)
         self._anchor_price: Optional[float] = None
         self._prev_anchor_price: Optional[float] = None
@@ -259,247 +222,109 @@ class FollowMMEngine:
         target_price = _normalize_price(self._anchor_price)
         bait_qty = _normalize_qty(self.cfg.min_order_usdt / target_price)
 
-        max_retries = 3
+        is_bid = self.side == "bid"
+        opp_side = "ask" if is_bid else "bid"
+        my_side = "bid" if is_bid else "ask"
 
-        if self.side == "bid":
-            # step 1: place ask bait order
-            self.logger.info(
-                f"{self.ticker} [BAIT] ASK {target_price:.3f} qty={bait_qty:.8f} (≈{self.cfg.min_order_usdt} USDT)"
-            )
+        # Step 1: Bait Order
+        self.logger.info(
+            f"{self.ticker} [BAIT] {opp_side.upper()} {target_price:.3f} qty={bait_qty:.8f}"
+        )
+        if not self._retry_order(opp_side, target_price, bait_qty, "BAIT"):
+            return
 
-            retry_count = 0
-            while retry_count < max_retries:
-                try:
-                    place_limit_order(self.driver, "ask", target_price, bait_qty)
-                    _maybe_wait_toast(self.cfg)
-                    _sleep_tiny()
-                    break
-                except Exception as e:
-                    retry_count += 1
-                    self.logger.warning(
-                        f"BAIT failed ({retry_count}/{max_retries}): {e}"
-                    )
-                    if retry_count >= max_retries:
-                        self.logger.error("BAIT failed - SKIP")
-                        return
-                    time.sleep(1)
+        # Step 2: Orderbook Analysis
+        time.sleep(0.3)
+        blocking_orders = self._get_blocking_orders(opp_side, target_price, is_bid)
 
-            # step 2: check current asks orderbook
-            time.sleep(0.3)  # wait for bait to appear
-            blocking_asks = read_orderbook_asks(self.driver)
-            blocking_asks = [ask for ask in blocking_asks if ask.price < target_price]
+        # Step 3: Check balance or qty
+        total_sweep_qty = bait_qty + sum(o.qty for o in blocking_orders)
+        if not self._check_balance_available(total_sweep_qty, target_price, is_bid):
+            return
 
-            if not blocking_asks:
-                self.logger.info(f"{self.ticker} [SWEEP] No intermediate asks found")
-            else:
-                self.logger.info(
-                    f"{self.ticker} [SWEEP] Found {len(blocking_asks)} blocking asks"
-                )
+        # 5. Step 5: Sweep order
+        self.logger.info(
+            f"{self.ticker} [SWEEP] {my_side.upper()} {total_sweep_qty:.8f} units"
+        )
+        if not self._retry_order(my_side, target_price, total_sweep_qty, "SWEEP"):
+            return
 
-            # step 3: Calculate required funds (blocking_asks + bait)
-            total_qty_needed = bait_qty
-            total_usdt_needed = target_price * bait_qty
+        # 6. Step 6: Anchor order
+        self._place_anchor_order(my_side, target_price, is_bid)
+        self.logger.info(f"{self.ticker} ✅ Setup complete at {target_price:.3f}")
 
-            for ask in blocking_asks:
-                total_qty_needed += ask.qty
-                total_usdt_needed += ask.price * ask.qty
-
-            # step 4: check balance
+    def _retry_order(self, side, price, qty, label, max_retries=3):
+        for i in range(max_retries):
             try:
-                available = (
-                    get_available_buy_usdt(self.driver) * self.cfg.buy_budget_ratio
-                )
+                place_limit_order(self.driver, side, price, qty)
+                _maybe_wait_toast(self.cfg)
+                _sleep_tiny()
+                return True
             except Exception as e:
-                self.logger.error(f"Balance check failed: {e}")
-                return
-
-            if total_usdt_needed > available:
-                self.logger.error(
-                    f"{self.ticker} [INSUFFICIENT FUNDS] Required: {total_usdt_needed:.2f} USDT, "
-                    f"Available: {available:.2f} USDT - SKIP"
-                )
-                return
-
-            # step 5: sweep all asks with single order
-            self.logger.info(
-                f"{self.ticker} [SWEEP] Starting sweep for {total_qty_needed:.8f} units "
-                f"(≈{total_usdt_needed:.2f} USDT)"
-            )
-
-            retry_count = 0
-            while retry_count < max_retries:
-                try:
-                    place_limit_order(
-                        self.driver, "bid", target_price, total_qty_needed
-                    )
-                    _maybe_wait_toast(self.cfg)
-                    _sleep_tiny()
-                    self.logger.info(
-                        f"{self.ticker} [SWEEP] ✅ Filled {total_qty_needed:.8f} at {target_price:.3f}"
-                    )
-                    break
-                except Exception as e:
-                    retry_count += 1
-                    self.logger.warning(
-                        f"SWEEP failed ({retry_count}/{max_retries}): {e}"
-                    )
-                    if retry_count >= max_retries:
-                        self.logger.error("SWEEP failed")
-                        return
+                self.logger.warning(f"{label} failed ({i+1}/{max_retries}): {e}")
+                if i < max_retries - 1:
                     time.sleep(1)
+        self.logger.error(f"{label} retry failed - SKIP")
+        return False
 
-            # step 6: anchor order
-            try:
+    def _get_blocking_orders(self, side, target_price, is_bid):
+        orders = read_orderbook(self.driver, side)
+        if is_bid:
+            blocking = [o for o in orders if o.price < target_price]
+        else:
+            blocking = [o for o in orders if o.price > target_price]
+
+        if blocking:
+            self.logger.info(
+                f"{self.ticker} [SWEEP] Found {len(blocking)} blocking orders"
+            )
+        return blocking
+
+    def _check_balance_available(self, qty, price, is_bid):
+        try:
+            if is_bid:
+                avail = get_available_buy_usdt(self.driver) * self.cfg.buy_budget_ratio
+                needed = qty * price
+                if needed > avail:
+                    self.logger.error(
+                        f"[INSUFFICIENT USDT] Need: {needed:.2f}, Avail: {avail:.2f}"
+                    )
+                    return False
+            else:
+                avail = get_available_sell_qty(self.driver) * self.cfg.sell_qty_ratio
+                if qty > avail:
+                    self.logger.error(
+                        f"[INSUFFICIENT QTY] Need: {qty:.8f}, Avail: {avail:.8f}"
+                    )
+                    return False
+            return True
+        except Exception as e:
+            self.logger.error(f"Balance check error: {e}")
+            return False
+
+    def _place_anchor_order(self, side, price, is_bid):
+        try:
+            if is_bid:
                 usdt = (
                     get_available_buy_usdt(self.driver)
                     * self.cfg.buy_budget_ratio
                     * self.cfg.anchor_order_budget_ratio
                 )
-                qty = _normalize_qty(usdt / target_price)
-
-                if qty > 0:
-                    self.logger.info(
-                        f"{self.ticker} [ANCHOR] BID {target_price:.3f} qty={qty:.8f}"
-                    )
-
-                    retry_count = 0
-                    while retry_count < max_retries:
-                        try:
-                            place_limit_order(self.driver, "bid", target_price, qty)
-                            _maybe_wait_toast(self.cfg)
-                            _sleep_tiny()
-                            break
-                        except Exception as e:
-                            retry_count += 1
-                            self.logger.warning(
-                                f"Anchor failed ({retry_count}/{max_retries}): {e}"
-                            )
-                            if retry_count >= max_retries:
-                                self.logger.error("Anchor failed")
-                            else:
-                                time.sleep(1)
-            except Exception as e:
-                self.logger.error(f"Balance check failed: {e}")
-
-            self.logger.info(f"{self.ticker} ✅ Setup complete at {target_price:.3f}")
-
-        else:
-            # step 1: place bid bait order
-            self.logger.info(
-                f"{self.ticker} [BAIT] BID {target_price:.3f} qty={bait_qty:.8f} (≈{self.cfg.min_order_usdt} USDT)"
-            )
-
-            retry_count = 0
-            while retry_count < max_retries:
-                try:
-                    place_limit_order(self.driver, "bid", target_price, bait_qty)
-                    _maybe_wait_toast(self.cfg)
-                    _sleep_tiny()
-                    break
-                except Exception as e:
-                    retry_count += 1
-                    self.logger.warning(
-                        f"BAIT failed ({retry_count}/{max_retries}): {e}"
-                    )
-                    if retry_count >= max_retries:
-                        self.logger.error("BAIT failed - SKIP")
-                        return
-                    time.sleep(1)
-
-            # step 2: check current bids orderbook
-            time.sleep(0.3)
-            blocking_bids = read_orderbook_bids(self.driver)
-            blocking_bids = [bid for bid in blocking_bids if bid.price > target_price]
-
-            if not blocking_bids:
-                self.logger.info(f"{self.ticker} [SWEEP] No intermediate bids found")
+                qty = _normalize_qty(usdt / price)
             else:
-                self.logger.info(
-                    f"{self.ticker} [SWEEP] Found {len(blocking_bids)} blocking bids"
-                )
-
-            # 3. Calculate required funds
-            total_qty_needed = bait_qty
-            for bid in blocking_bids:
-                total_qty_needed += bid.qty
-
-            # step 4: check balance
-            try:
-                available = (
-                    get_available_sell_qty(self.driver) * self.cfg.sell_qty_ratio
-                )
-            except Exception as e:
-                self.logger.error(f"Balance check failed: {e}")
-                return
-
-            if total_qty_needed > available:
-                self.logger.error(
-                    f"{self.ticker} [INSUFFICIENT QTY] Required: {total_qty_needed:.8f}, "
-                    f"Available: {available:.8f} - SKIP"
-                )
-                return
-
-            # step 5: sweep all bids with single order
-            self.logger.info(
-                f"{self.ticker} [SWEEP] Starting sweep sell for {total_qty_needed:.8f} units"
-            )
-
-            retry_count = 0
-            while retry_count < max_retries:
-                try:
-                    place_limit_order(
-                        self.driver, "ask", target_price, total_qty_needed
-                    )
-                    _maybe_wait_toast(self.cfg)
-                    _sleep_tiny()
-                    self.logger.info(
-                        f"{self.ticker} [SWEEP] ✅ Filled {total_qty_needed:.8f} at {target_price:.3f}"
-                    )
-                    break
-                except Exception as e:
-                    retry_count += 1
-                    self.logger.warning(
-                        f"SWEEP failed ({retry_count}/{max_retries}): {e}"
-                    )
-                    if retry_count >= max_retries:
-                        self.logger.error("SWEEP failed")
-                        return
-                    time.sleep(1)
-
-            # step 6: anchor order
-            try:
-                coin = (
+                qty = _normalize_qty(
                     get_available_sell_qty(self.driver)
                     * self.cfg.sell_qty_ratio
                     * self.cfg.anchor_order_budget_ratio
                 )
-                qty = _normalize_qty(coin)
 
-                if qty > 0:
-                    self.logger.info(
-                        f"{self.ticker} [ANCHOR] ASK {target_price:.3f} qty={qty:.8f}"
-                    )
-
-                    retry_count = 0
-                    while retry_count < max_retries:
-                        try:
-                            place_limit_order(self.driver, "ask", target_price, qty)
-                            _maybe_wait_toast(self.cfg)
-                            _sleep_tiny()
-                            break
-                        except Exception as e:
-                            retry_count += 1
-                            self.logger.warning(
-                                f"Anchor failed ({retry_count}/{max_retries}): {e}"
-                            )
-                            if retry_count >= max_retries:
-                                self.logger.error("Anchor failed")
-                            else:
-                                time.sleep(1)
-            except Exception as e:
-                self.logger.error(f"Balance check failed: {e}")
-
-            self.logger.info(f"{self.ticker} ✅ Setup complete at {target_price:.3f}")
+            if qty > 0:
+                self.logger.info(
+                    f"{self.ticker} [ANCHOR] {side.upper()} {price:.3f} qty={qty:.8f}"
+                )
+                self._retry_order(side, price, qty, "ANCHOR")
+        except Exception as e:
+            self.logger.error(f"Anchor failed: {e}")
 
     def _sync_with_binance(self):
         symbol = f"{self.ticker.upper()}USDT"
@@ -587,11 +412,13 @@ class FollowMMEngine:
     def _fill_ladder_to_target(self):
         rows = read_open_orders_side(self.driver, self.side)
         need = self.cfg.levels - len(rows)
-        if need <= 0:
+
+        if len(rows) > self.cfg.levels:
             if FLAG_REMOVE_EXCESS_ORDERS_ENABLE:
                 self._remove_excess_orders()
-            else:
-                return
+            return
+        elif len(rows) == self.cfg.levels:
+            return
 
         if len(rows) == 0:
             prices = self._calculate_orderbook_levels()
