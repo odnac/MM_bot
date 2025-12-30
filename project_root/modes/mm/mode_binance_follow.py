@@ -31,15 +31,12 @@ from config import (
     MIN_ORDER_USDT,
 )
 from modes.utils_driver import init_driver
-from project_root.modes.mm.vic_account_balance import (
+from modes.mm.vic_account_balance import (
     get_available_buy_usdt,
     get_available_sell_qty,
 )
-from project_root.modes.mm.vic_trade import place_limit_order
-from project_root.modes.mm.vic_orders import (
-    read_open_orders_side,
-    cancel_open_orders_row,
-)
+from modes.mm.vic_trade import place_limit_order
+from modes.mm.vic_orders import read_open_orders_side, cancel_open_orders_row
 from modes.market_data import get_binance_price
 from modes.utils_logging import setup_logger
 from modes.utils_ui import validate_login_or_exit
@@ -94,7 +91,7 @@ def _step_ratio(step_percent: float) -> float:
 
 
 def _normalize_price(price: float) -> float:
-    return round(float(price), 3)
+    return round(float(price), 8)
 
 
 def _normalize_qty(qty: float) -> float:
@@ -117,11 +114,6 @@ def _weights_pyramid(n: int) -> List[float]:
 
 def _sleep_tiny():
     time.sleep(0.15)
-
-
-def _maybe_wait_toast(cfg: EngineConfig):
-    if cfg.toast_wait_sec and cfg.toast_wait_sec > 0:
-        time.sleep(cfg.toast_wait_sec)
 
 
 def _vic_trade_url(vic_url: str, ticker: str) -> str:
@@ -260,7 +252,6 @@ class FollowMMEngine:
         for i in range(max_retries):
             try:
                 place_limit_order(self.driver, side, price, qty)
-                _maybe_wait_toast(self.cfg)
                 _sleep_tiny()
                 return True
             except Exception as e:
@@ -419,9 +410,9 @@ class FollowMMEngine:
         if len(rows) > self.cfg.levels:
             if FLAG_REMOVE_EXCESS_ORDERS_ENABLE:
                 self._remove_excess_orders()
-            return
-        elif len(rows) == self.cfg.levels:
-            return
+                return
+            elif len(rows) == self.cfg.levels:
+                return
 
         if len(rows) == 0:
             prices = self._calculate_orderbook_levels()
@@ -465,13 +456,13 @@ class FollowMMEngine:
                 qty = _normalize_qty(budget / price)
                 if qty <= 0:
                     continue
+                usdt_value = price * qty
                 self.logger.info(
                     f"{self.ticker} [LADDER] {self.side.upper()} "
-                    f"price={price:.3f} qty={qty:.8f}"
+                    f"price={price:.3f} qty={qty:.8f} ≈{usdt_value:,.0f}usdt"
                 )
                 try:
                     place_limit_order(self.driver, "bid", price, qty)
-                    _maybe_wait_toast(self.cfg)
                     _sleep_tiny()
                 except Exception as e:
                     self.logger.warning(f"Failed to place ladder order at {price}: {e}")
@@ -493,13 +484,13 @@ class FollowMMEngine:
                 qty = _normalize_qty(coin * w)
                 if qty <= 0:
                     continue
+                usdt_value = price * qty
                 self.logger.info(
                     f"{self.ticker} [LADDER] {self.side.upper()} "
-                    f"price={price:.3f} qty={qty:.8f}"
+                    f"price={price:.3f} qty={qty:.8f} ≈{usdt_value:,.0f}usdt"
                 )
                 try:
                     place_limit_order(self.driver, "ask", price, qty)
-                    _maybe_wait_toast(self.cfg)
                     _sleep_tiny()
                 except Exception as e:
                     self.logger.warning(f"Failed to place ladder order at {price}: {e}")
@@ -528,7 +519,6 @@ class FollowMMEngine:
                 cancel_open_orders_row(
                     self.driver, row, timeout=self.cfg.cancel_row_timeout_sec
                 )
-                _maybe_wait_toast(self.cfg)
                 ops += 1
             except (StaleElementReferenceException, WebDriverException):
                 continue
