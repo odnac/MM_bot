@@ -10,8 +10,7 @@ from selenium.common.exceptions import (
     TimeoutException,
     StaleElementReferenceException,
 )
-
-FLAG_VIC_TRADE_DEBUGGING_PRINT = False
+from config import FLAG_VIC_TRADE_DEBUGGING_PRINT
 
 
 def _set_input_value(driver, by, locator, value: str, timeout: int = 10):

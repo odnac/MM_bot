@@ -13,8 +13,7 @@ from selenium.common.exceptions import (
     TimeoutException,
     StaleElementReferenceException,
 )
-
-FLAG_VIC_ORDERS_DEBUGGING_PRINT = False
+from config import FLAG_VIC_ORDERS_DEBUGGING_PRINT
 
 Side = Literal["bid", "ask"]
 
@@ -168,7 +167,7 @@ def read_open_orders_side(driver, side: Side, timeout: int = 10) -> List[OrderRo
         if row_side != side:
             continue
 
-        price_text = tds[PRICE_TD_IDX].text  # "90,935\nUSDT" 형태 가능
+        price_text = tds[PRICE_TD_IDX].text  # "90,935\nUSDT"
         try:
             price = _parse_number(price_text)
         except Exception:
@@ -283,3 +282,55 @@ def cancel_open_orders_row(driver, order_row: OrderRow, timeout: int = 15) -> bo
     except Exception as e:
         print(f"[CANCEL ERROR] Failed to cancel order {order_id}: {e}")
         return False
+
+
+def _cancel_all_open_orders_side(
+    driver, side: Side, timeout: int = 15
+) -> tuple[int, int]:
+    try:
+        rows = read_open_orders_side(driver, side, timeout=10)
+
+        if not rows:
+            if FLAG_VIC_ORDERS_DEBUGGING_PRINT:
+                print(f"[CANCEL] No {side.upper()} orders to cancel.")
+            return (0, 0)
+
+        if FLAG_VIC_ORDERS_DEBUGGING_PRINT:
+            print(f"[CANCEL] Cancelling {len(rows)} {side.upper()} orders...")
+
+        cancelled = 0
+        for row in rows:
+            try:
+                if cancel_open_orders_row(driver, row, timeout=timeout):
+                    cancelled += 1
+                    time.sleep(0.3)
+            except Exception as e:
+                print(f"[CANCEL ERROR] Failed to cancel order at {row.price}: {e}")
+                continue
+        if FLAG_VIC_ORDERS_DEBUGGING_PRINT:
+            print(
+                f"[CANCEL] Successfully cancelled {cancelled}/{len(rows)} {side.upper()} orders."
+            )
+        return (cancelled, len(rows))
+
+    except Exception as e:
+        print(f"[CANCEL ERROR] Error during _cancel_all_open_orders_side: {e}")
+        return (0, 0)
+
+
+def cancel_all_open_orders(driver, timeout: int = 15) -> tuple[int, int]:
+    if FLAG_VIC_ORDERS_DEBUGGING_PRINT:
+        print(f"[CANCEL] Cancelling all orders (both BID and ASK)...")
+
+    bid_success, bid_total = _cancel_all_open_orders_side(driver, "bid", timeout)
+    ask_success, ask_total = _cancel_all_open_orders_side(driver, "ask", timeout)
+
+    total_success = bid_success + ask_success
+    total_count = bid_total + ask_total
+
+    if FLAG_VIC_ORDERS_DEBUGGING_PRINT:
+        print(
+            f"[CANCEL] Total: {total_success}/{total_count} orders cancelled (BID: {bid_success}/{bid_total}, ASK: {ask_success}/{ask_total})"
+        )
+
+    return (total_success, total_count)

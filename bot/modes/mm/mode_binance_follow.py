@@ -36,7 +36,11 @@ from modes.mm.vic_account_balance import (
     get_available_sell_qty,
 )
 from modes.mm.vic_trade import place_limit_order
-from modes.mm.vic_orders import read_open_orders_side, cancel_open_orders_row
+from modes.mm.vic_orders import (
+    read_open_orders_side,
+    cancel_open_orders_row,
+    cancel_all_open_orders,
+)
 from modes.market_data import get_binance_price
 from modes.utils_logging import setup_logger
 from modes.utils_ui import validate_login_or_exit
@@ -161,6 +165,14 @@ class FollowMMEngine:
         self._rebase_lock = False
 
     def run_mm(self):
+
+        # cancle all open orders
+        success, total = cancel_all_open_orders(self.driver)
+        self.logger.info(
+            f"{self.ticker} Initial cleanup: {success}/{total} orders cancelled."
+        )
+
+        # full rebalance
         self.full_rebalance()
 
         while True:
