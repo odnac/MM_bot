@@ -304,7 +304,14 @@ class FollowMMEngine:
             f"{self.ticker} [BAIT] {opp_side.upper()} {target_price:.3f} qty={bait_qty:.8f}"
         )
         if not self._retry_order(opp_side, target_price, bait_qty, "BAIT"):
-            return
+            self.logger.critical(
+                f"{self.ticker} ❌ CRITICAL ERROR: BAIT order failed after retries. "
+                "Program will stop to prevent unexpected behavior."
+            )
+            raise RuntimeError(
+                f"BAIT order failed for {self.ticker}. "
+                "Check logs for details. Program stopped."
+            )
 
         time.sleep(0.3)
         blocking_orders = self._get_blocking_orders(opp_side, target_price, is_bid)
