@@ -336,14 +336,26 @@ class FollowMMEngine:
     def _retry_order(self, side, price, qty, label, max_retries=3):
         for i in range(max_retries):
             try:
-                place_limit_order(self.driver, side, price, qty)
-                _sleep_tiny()
-                return True
+                success = place_limit_order(self.driver, side, price, qty)
+                if success:
+                    _sleep_tiny()
+                    self.logger.info(
+                        f"✅ {label} order SUCCESS: {side.upper()} {price:.3f} qty={qty:.8f}"
+                    )
+                    return True
+                else:
+                    self.logger.warning(
+                        f"⚠️ {label} order FAILED ({i+1}/{max_retries}): Order function returned False"
+                    )
+                    if i < max_retries - 1:
+                        time.sleep(1)
             except Exception as e:
-                self.logger.warning(f"{label} failed ({i+1}/{max_retries}): {e}")
+                self.logger.warning(
+                    f"⚠️ {label} order FAILED ({i+1}/{max_retries}): {e}"
+                )
                 if i < max_retries - 1:
                     time.sleep(1)
-        self.logger.error(f"{label} retry failed - SKIP")
+        self.logger.error(f"❌ {label} order FAILED after {max_retries} retries - SKIP")
         return False
 
     def _get_blocking_orders(self, side, target_price, is_bid):
@@ -412,7 +424,9 @@ class FollowMMEngine:
                 self.logger.info(
                     f"{self.ticker} [ANCHOR] {side.upper()} {price:.3f} qty={qty:.8f}"
                 )
-                self._retry_order(side, price, qty, "ANCHOR")
+                success = self._retry_order(side, price, qty, "ANCHOR")
+                if not success:
+                    self.logger.error(f"❌ ANCHOR order placement failed")
         except Exception as e:
             self.logger.error(f"Anchor failed: {e}")
 
@@ -613,10 +627,16 @@ class FollowMMEngine:
                     f"price={price:.3f} qty={qty:.8f} ≈{usdt_value:,.0f}usdt ({self.cfg.distribution_mode})"
                 )
                 try:
-                    place_limit_order(self.driver, "bid", price, qty)
+                    success = place_limit_order(self.driver, "bid", price, qty)
                     _sleep_tiny()
+                    if success:
+                        self.logger.info(f"✅ LADDER order SUCCESS at {price:.3f}")
+                    else:
+                        self.logger.error(
+                            f"❌ LADDER order FAILED at {price:.3f}: Order function returned False"
+                        )
                 except Exception as e:
-                    self.logger.warning(f"Failed to place ladder order at {price}: {e}")
+                    self.logger.error(f"❌ LADDER order FAILED at {price:.3f}: {e}")
                     continue
         else:
             try:
@@ -659,10 +679,16 @@ class FollowMMEngine:
                     f"price={price:.3f} qty={qty:.8f} ≈{usdt_value:,.0f}usdt ({self.cfg.distribution_mode})"
                 )
                 try:
-                    place_limit_order(self.driver, "ask", price, qty)
+                    success = place_limit_order(self.driver, "ask", price, qty)
                     _sleep_tiny()
+                    if success:
+                        self.logger.info(f"✅ LADDER order SUCCESS at {price:.3f}")
+                    else:
+                        self.logger.error(
+                            f"❌ LADDER order FAILED at {price:.3f}: Order function returned False"
+                        )
                 except Exception as e:
-                    self.logger.warning(f"Failed to place ladder order at {price}: {e}")
+                    self.logger.error(f"❌ LADDER order FAILED at {price:.3f}: {e}")
                     continue
 
     def _remove_excess_orders(self):
