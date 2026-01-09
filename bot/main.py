@@ -110,11 +110,18 @@ def main():
                     fixed_amount = _prompt_fixed_amount()
 
                 run_follow_mm_ask(VIC_URL, ticker, fixed_amount=fixed_amount)
+            elif mode == "5":
+                #
+                #
+                # TODO: ask, bid bot combine
+                #
+                #
+                pass
             elif mode == "q":
                 print("Bye 👋...\n\n")
                 break
             else:
-                print("Invalid input. Please enter 1, 2, 3, 4 or q.")
+                print("Invalid input. Please enter 1, 2, 3, 4, 5 or q.")
 
         except KeyboardInterrupt:
             print("\n[!] Interrupted by user (Ctrl+C). Exiting safely...\n\n")

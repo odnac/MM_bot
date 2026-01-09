@@ -86,8 +86,8 @@ def _build_cfg(fixed_amount: Optional[float] = None) -> EngineConfig:
         toast_wait_sec=MM_TOAST_WAIT_SEC,
         anchor_order_budget_ratio=ANCHOR_ORDER_BUDGET_RATIO,
         min_order_usdt=MIN_ORDER_USDT,
-        fixed_amount=fixed_amount,  # NEW
-        distribution_mode=MM_DISTRIBUTION_MODE,  # NEW
+        fixed_amount=fixed_amount,
+        distribution_mode=MM_DISTRIBUTION_MODE,
     )
 
 
@@ -195,6 +195,94 @@ class FollowMMEngine:
             )
         self.logger.info(f"{self.ticker} [DISTRIBUTION MODE] {cfg.distribution_mode}")
 
+    def _validate_initial_balance(self):
+        """
+        Validate that account has sufficient balance before starting MM.
+        Only applies when using fixed amount mode.
+        """
+        if self.cfg.fixed_amount is None:
+            return  # Percentage mode - no validation needed
+
+        try:
+            if self.side == "bid":
+                available = get_available_buy_usdt(self.driver)
+
+                if available <= 0:
+                    self.logger.critical(
+                        f"{self.ticker} ❌ CRITICAL ERROR: No available to buy! "
+                        f"Available: {available:.8f}"
+                    )
+                    raise RuntimeError(
+                        f"No {self.ticker} usdt available for buying. "
+                        f"Program stopped."
+                    )
+
+                required = self.cfg.fixed_amount
+
+                self.logger.info(
+                    f"{self.ticker} [BALANCE CHECK] "
+                    f"Available: {available:.2f} USDT, Required: {required:.2f} USDT"
+                )
+
+                # Require 10% buffer for fees
+                if available < required * 1.1:
+                    self.logger.critical(
+                        f"{self.ticker} ❌ CRITICAL ERROR: Insufficient balance! "
+                        f"Available: {available:.2f} USDT, "
+                        f"Required: {required * 1.1:.2f} USDT (including 10% fee buffer)"
+                    )
+                    raise RuntimeError(
+                        f"Insufficient USDT balance for {self.ticker}. "
+                        f"Need {required * 1.1:.2f} USDT but only have {available:.2f} USDT. "
+                        f"Program stopped."
+                    )
+
+            else:  # ask side - need to check coin value in USDT
+                available_coin = get_available_sell_qty(self.driver)
+
+                if available_coin <= 0:
+                    self.logger.critical(
+                        f"{self.ticker} ❌ CRITICAL ERROR: No coins available to sell! "
+                        f"Available: {available_coin:.8f}"
+                    )
+                    raise RuntimeError(
+                        f"No {self.ticker} coins available for selling. "
+                        f"Program stopped."
+                    )
+
+                # Get current price to calculate coin value
+                symbol = f"{self.ticker.upper()}USDT"
+                current_price = get_binance_price(symbol)
+                coin_value_usdt = available_coin * current_price
+                required = self.cfg.fixed_amount
+
+                self.logger.info(
+                    f"{self.ticker} [BALANCE CHECK] "
+                    f"Available coins: {available_coin:.8f}, "
+                    f"Current price: {current_price:.2f}, "
+                    f"Coin value: {coin_value_usdt:.2f} USDT, "
+                    f"Required: {required:.2f} USDT"
+                )
+
+                # Require 10% buffer for fees
+                if coin_value_usdt < required * 1.1:
+                    self.logger.critical(
+                        f"{self.ticker} ❌ CRITICAL ERROR: Insufficient coin value! "
+                        f"Coin value: {coin_value_usdt:.2f} USDT, "
+                        f"Required: {required * 1.1:.2f} USDT (including 10% fee buffer)"
+                    )
+                    raise RuntimeError(
+                        f"Insufficient {self.ticker} coin value. "
+                        f"Need {required * 1.1:.2f} USDT worth but only have {coin_value_usdt:.2f} USDT worth. "
+                        f"Program stopped."
+                    )
+
+        except RuntimeError:
+            raise  # Re-raise RuntimeError to stop program
+        except Exception as e:
+            self.logger.error(f"Balance check error: {e}")
+            raise RuntimeError(f"Failed to check balance: {e}")
+
     # ... (keep _ensure_clean_start and run_mm as they are)
     def _ensure_clean_start(self):
         self.logger.info(f"{self.ticker} [INIT] Initializing market maker...")
@@ -235,6 +323,11 @@ class FollowMMEngine:
         )
 
     def run_mm(self):
+
+        # compare: balance with fixed_amount
+        self._validate_initial_balance()
+
+        # cancel: open orders
         self._ensure_clean_start()
 
         bid_orders = read_open_orders_side(self.driver, "bid")
@@ -247,6 +340,7 @@ class FollowMMEngine:
             )
             return
 
+        # init: bait -> anchor -> ladder
         self.full_rebalance()
 
         while True:
